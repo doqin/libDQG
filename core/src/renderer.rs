@@ -91,7 +91,7 @@ impl<'a> Renderer<'a> {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(color.to_wgpu_color()),
+                        load: wgpu::LoadOp::Clear(color.as_wgpu_color()),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,

@@ -10,7 +10,7 @@ impl Color {
         Self { r, g, b, a }
     }
 
-    pub fn to_wgpu_color(&self) -> wgpu::Color {
+    pub fn as_wgpu_color(&self) -> wgpu::Color {
         wgpu::Color {
             r: self.r,
             g: self.g,
