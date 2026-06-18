@@ -2,6 +2,8 @@ pub mod app;
 pub mod game;
 pub mod renderer;
 pub mod scene;
+pub mod types;
+pub mod input;
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right

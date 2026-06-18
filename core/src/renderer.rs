@@ -69,7 +69,7 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    pub fn clear(&mut self) {
+    pub fn clear(&mut self, color: crate::types::Color) {
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(surface_texture) => surface_texture,
             wgpu::CurrentSurfaceTexture::Suboptimal(surface_texture) => surface_texture,
@@ -91,7 +91,7 @@ impl<'a> Renderer<'a> {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.1, g: 0.2, b: 0.3, a: 1.0 }), // Cornflower blue background
+                        load: wgpu::LoadOp::Clear(color.to_wgpu_color()),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,

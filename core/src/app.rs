@@ -3,11 +3,13 @@ use winit::event::WindowEvent;
 use winit::window::{Window, WindowId};
 use crate::scene::{Scene, SceneManager};
 use crate::renderer::Renderer;
+use crate::input::InputState;
 
 pub struct App<'a> {
     window: Option<std::sync::Arc<Window>>,
     scene_manager: SceneManager,
     renderer: Option<Renderer<'a>>,
+    input_state: InputState,
 }
 
 impl<'a> App<'a> {
@@ -19,6 +21,7 @@ impl<'a> App<'a> {
             window: None,
             scene_manager,
             renderer: None,
+            input_state: InputState::new(),
         }
     }
 }
@@ -40,6 +43,9 @@ impl<'a> ApplicationHandler for App<'a> {
         event: winit::event::WindowEvent,
     ) {
         match event {
+            WindowEvent::KeyboardInput { event, .. } => {
+                self.input_state.handle_event(&event);
+            }
             WindowEvent::CloseRequested => {
                 println!("The close button was pressed; stopping");
                 event_loop.exit();
@@ -53,8 +59,9 @@ impl<'a> ApplicationHandler for App<'a> {
             },
             WindowEvent::RedrawRequested => {
                 // Handle redraw here
-                self.scene_manager.update();
+                self.scene_manager.update(&self.input_state);
                 self.scene_manager.render(&mut self.renderer.as_mut().unwrap());
+                self.input_state.clear_frame_states();
                 // Request another redraw
                 self.window.as_ref().unwrap().request_redraw();
             },
