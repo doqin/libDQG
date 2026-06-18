@@ -1,30 +1,36 @@
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::window::{Window, WindowId};
-use crate::game::Game;
+use crate::scene::{Scene, SceneManager};
+use crate::renderer::Renderer;
 
-#[derive(Default)]
-pub struct App<G> where G: Game {
-    window: Option<Window>,
-    game: G,
+pub struct App<'a> {
+    window: Option<std::sync::Arc<Window>>,
+    scene_manager: SceneManager,
+    renderer: Option<Renderer<'a>>,
 }
 
-impl<G> App<G> where G: Game {
-    pub fn new(mut game: G) -> Self {
-        game.init();
+impl<'a> App<'a> {
+    pub fn new(scene: Box<dyn Scene>) -> Self {
+        let mut scene_manager = SceneManager::new();
+        scene_manager.add_scene(scene);
+
         Self {
             window: None,
-            game: game,
+            scene_manager,
+            renderer: None,
         }
     }
 }
 
-impl<G> ApplicationHandler for App<G> where G: Game {
+impl<'a> ApplicationHandler for App<'a> {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         match event_loop.create_window(Window::default_attributes()) {
-            Ok(window) => self.window = Some(window),
+            Ok(window) => self.window = Some(std::sync::Arc::new(window)),
             Err(e) => panic!("Failed to create window: {:?}", e),
         }
+        let renderer = pollster::block_on(Renderer::new(self.window.as_ref().unwrap().clone()));
+        self.renderer = Some(renderer);
     }
 
     fn window_event(
@@ -38,10 +44,17 @@ impl<G> ApplicationHandler for App<G> where G: Game {
                 println!("The close button was pressed; stopping");
                 event_loop.exit();
             },
+            WindowEvent::Resized(physical_size) => {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    let window = self.window.as_ref().unwrap();
+                    renderer.resize(physical_size);
+                    window.request_redraw();
+                }
+            },
             WindowEvent::RedrawRequested => {
                 // Handle redraw here
-                self.game.update();
-                self.game.render();
+                self.scene_manager.update();
+                self.scene_manager.render(&mut self.renderer.as_mut().unwrap());
                 // Request another redraw
                 self.window.as_ref().unwrap().request_redraw();
             },

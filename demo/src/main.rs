@@ -1,22 +1,19 @@
-use libdqg::game::{Game, run_game};
+use libdqg::scene::Scene;
+use libdqg::game::run_game;
 
 struct MyGame {}
 
-impl Game for MyGame {
-    fn init(&mut self) {
-        // Initialization code here
-    }
-
-    fn update(&mut self) {
+impl Scene for MyGame {
+    fn update(&mut self) -> libdqg::scene::SceneTransition {
         // Update code here
+        libdqg::scene::SceneTransition::None
     }
 
-    fn render(&mut self) {
-        // Render code here
+    fn render(&mut self, renderer: &mut libdqg::renderer::Renderer) {
+        renderer.clear();
     }
 }
 
 fn main() {
-    let game = MyGame {};
-    run_game(game);
+    run_game(Box::new(MyGame {}));
 }

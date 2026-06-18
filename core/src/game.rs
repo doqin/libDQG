@@ -1,15 +1,10 @@
 use winit::event_loop::EventLoop;
+use crate::scene::Scene;
 
 use crate::app::App;
 
-pub trait Game {
-    fn init(&mut self);
-    fn update(&mut self);
-    fn render(&mut self);
-}
-
-pub fn run_game<G: Game + 'static>(game: G) {
-    let mut app = App::new(game);
+pub fn run_game(initial_scene: Box<dyn Scene>) {
+    let mut app = App::new(initial_scene);
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     match event_loop.run_app(&mut app) {
