@@ -1,37 +1,52 @@
+use std::time::Instant;
 use winit::application::ApplicationHandler;
+use winit::dpi::{PhysicalSize, Size};
 use winit::event::WindowEvent;
-use winit::window::{Window, WindowId};
+use winit::window::{Window, WindowAttributes, WindowId};
 use crate::scene::{Scene, SceneManager};
 use crate::renderer::Renderer;
 use crate::input::InputState;
 
 pub struct App<'a> {
+    title: String,
+    width: u32,
+    height: u32,
     window: Option<std::sync::Arc<Window>>,
     scene_manager: SceneManager,
     renderer: Option<Renderer<'a>>,
     input_state: InputState,
+    frame_start: Instant,
 }
 
 impl<'a> App<'a> {
-    pub fn new(scene: Box<dyn Scene>) -> Self {
-        let mut scene_manager = SceneManager::new();
-        scene_manager.add_scene(scene);
-
+    pub fn new(title: String, width: u32, height: u32) -> Self {
+        let scene_manager = SceneManager::new();
         Self {
+            title,
+            width,
+            height,
             window: None,
             scene_manager,
             renderer: None,
             input_state: InputState::new(),
+            frame_start: Instant::now(),
         }
+    }
+
+    pub fn add_scene(&mut self, scene: Box<dyn Scene>) {
+        self.scene_manager.add_scene(scene);
     }
 }
 
 impl<'a> ApplicationHandler for App<'a> {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        match event_loop.create_window(Window::default_attributes()) {
+        let mut attrs = WindowAttributes::default();
+        attrs.title = self.title.clone();
+        attrs.inner_size = Some(Size::Physical(PhysicalSize::new(self.width, self.height)));
+        match event_loop.create_window(attrs) {
             Ok(window) => self.window = Some(std::sync::Arc::new(window)),
             Err(e) => panic!("Failed to create window: {:?}", e),
-        }
+        };
         let renderer = pollster::block_on(Renderer::new(self.window.as_ref().unwrap().clone()));
         self.renderer = Some(renderer);
     }
@@ -58,8 +73,10 @@ impl<'a> ApplicationHandler for App<'a> {
                 }
             },
             WindowEvent::RedrawRequested => {
+                let frame_time = self.frame_start.elapsed();
+                self.frame_start = Instant::now();
                 // Handle redraw here
-                self.scene_manager.update(&self.input_state);
+                self.scene_manager.update(frame_time.as_secs_f32(), &self.input_state);
                 self.scene_manager.render(&mut self.renderer.as_mut().unwrap());
                 self.input_state.clear_frame_states();
                 // Request another redraw

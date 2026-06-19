@@ -865,7 +865,6 @@ impl KeyCode {
             KeyCode::F33 => Some(winit::keyboard::KeyCode::F33),
             KeyCode::F34 => Some(winit::keyboard::KeyCode::F34),
             KeyCode::F35 => Some(winit::keyboard::KeyCode::F35),
-            _ => None,
         }
     }
 }

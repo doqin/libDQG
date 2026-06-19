@@ -1,5 +1,8 @@
-use libdqg::scene::Scene;
-use libdqg::game::run_game;
+use libdqg::input::InputState;
+use libdqg::renderer::Renderer;
+use libdqg::scene::{Scene, SceneTransition};
+use libdqg::game::{GameBuilder};
+use libdqg::types::{Color, KeyCode};
 use rand::RngExt;
 
 struct MyScene {
@@ -15,16 +18,16 @@ impl MyScene {
 }
 
 impl Scene for MyScene {
-    fn update(&mut self, input_state: &libdqg::input::InputState) -> libdqg::scene::SceneTransition {
-        if input_state.is_key_pressed(libdqg::types::KeyCode::Space) {
-            return libdqg::scene::SceneTransition::Replace(Box::new(MyOtherScene {}));
+    fn update(&mut self, _delta_time: f32, input_state: &InputState) -> SceneTransition {
+        if input_state.is_key_pressed(KeyCode::Space) {
+            return SceneTransition::Next;
         }
         // Update code here
-        libdqg::scene::SceneTransition::None
+        SceneTransition::None
     }
 
-    fn render(&mut self, renderer: &mut libdqg::renderer::Renderer) {
-        renderer.clear(libdqg::types::Color::new(
+    fn render(&mut self, renderer: &mut Renderer) {
+        renderer.clear(Color::new(
             self.rng.random_range(0.0..1.0), 
             self.rng.random_range(0.0..1.0), 
             self.rng.random_range(0.0..1.0), 
@@ -36,18 +39,23 @@ impl Scene for MyScene {
 struct MyOtherScene {}
 
 impl Scene for MyOtherScene {
-    fn update(&mut self, input_state: &libdqg::input::InputState) -> libdqg::scene::SceneTransition {
-        if input_state.is_key_pressed(libdqg::types::KeyCode::Space) {
-            return libdqg::scene::SceneTransition::Replace(Box::new(MyScene::new()));
+    fn update(&mut self, _delta_time: f32, input_state: &InputState) -> SceneTransition {
+        if input_state.is_key_pressed(KeyCode::Space) {
+            return SceneTransition::Previous;
         }
-        libdqg::scene::SceneTransition::None
+        SceneTransition::None
     }
 
-    fn render(&mut self, renderer: &mut libdqg::renderer::Renderer) {
-        renderer.clear(libdqg::types::Color::new(0.0, 0.0, 1.0, 1.0));
+    fn render(&mut self, renderer: &mut Renderer) {
+        renderer.clear(Color::new(0.0, 0.0, 1.0, 1.0));
     }
 }
 
 fn main() {
-    run_game(Box::new(MyScene::new()));
+    let mut game = GameBuilder::new(Box::new(MyScene::new()))
+        .add_scene(Box::new(MyOtherScene {}))
+        .title("My Game".into())
+        .size(800, 600)
+        .build();
+    game.run();
 }
