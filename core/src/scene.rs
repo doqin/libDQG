@@ -1,6 +1,6 @@
 use crate::{
     input::InputState, 
-    renderer::DrawPass
+    renderer::DrawPass,
 };
 
 pub trait Scene {

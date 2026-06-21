@@ -1,5 +1,6 @@
 pub mod types;
 mod draw_pass;
+pub mod extras;
 
 pub use draw_pass::DrawPass;
 pub use types::*;
@@ -14,6 +15,7 @@ pub struct Renderer<'a> {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
+    immediate_pipeline: RenderPipeline,
 }
 
 impl<'a> Renderer<'a> {
@@ -58,12 +60,15 @@ impl<'a> Renderer<'a> {
         };
         surface.configure(&device, &config);
 
+        let shape_pipeline = extras::create_shape_pipeline(&device, config.format);
+
         Self {
             device,
             surface,
             queue,
             config,
             size,
+            immediate_pipeline: shape_pipeline,
         }
     }
 
@@ -112,7 +117,14 @@ impl<'a> Renderer<'a> {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            let mut draw_pass = DrawPass { pass: render_pass };
+            let mut draw_pass = DrawPass {
+                pass: render_pass,
+                device: &self.device,
+                queue: &self.queue,
+                immediate_pipeline: &self.immediate_pipeline,
+                screen_w: self.size.width,
+                screen_h: self.size.height,
+            };
             draw_fn(&mut draw_pass);
         }
 
