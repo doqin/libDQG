@@ -6,6 +6,7 @@ use winit::window::{Window, WindowAttributes, WindowId};
 use crate::scene::{Scene, SceneManager};
 use crate::renderer::Renderer;
 use crate::input::InputState;
+use crate::types::Color;
 
 pub struct App<'a> {
     title: String,
@@ -77,7 +78,12 @@ impl<'a> ApplicationHandler for App<'a> {
                 self.frame_start = Instant::now();
                 // Handle redraw here
                 self.scene_manager.update(frame_time.as_secs_f32(), &self.input_state);
-                self.scene_manager.render(&mut self.renderer.as_mut().unwrap());
+                if let Some(renderer) = self.renderer.as_mut() {
+                    let clear_color = Color::new(0.1, 0.2, 0.3, 1.0);
+                    renderer.render(clear_color, |pass| {
+                        self.scene_manager.render(pass);
+                    });
+                }
                 self.input_state.clear_frame_states();
                 // Request another redraw
                 self.window.as_ref().unwrap().request_redraw();

@@ -1,11 +1,11 @@
 use crate::{
     input::InputState, 
-    renderer::Renderer
+    renderer::DrawPass
 };
 
 pub trait Scene {
     fn update(&mut self, delta_time: f32, input_state: &InputState) -> SceneTransition;
-    fn render(&mut self, renderer: &mut Renderer);
+    fn render(&mut self, pass: &mut DrawPass);
 }
     
 pub enum SceneTransition {
@@ -58,9 +58,9 @@ impl SceneManager {
         }
     }
 
-    pub fn render(&mut self, renderer: &mut Renderer) {
+    pub fn render(&mut self, pass: &mut DrawPass) {
         if let Some(current_scene) = self.scenes.get_mut(self.current_scene_index) {
-            current_scene.render(renderer);
+            current_scene.render(pass);
         }
     }
 }
