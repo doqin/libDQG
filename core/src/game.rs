@@ -29,6 +29,8 @@ pub struct GameBuilder {
     width: Option<u32>,
     height: Option<u32>,
     scenes: Vec<Box<dyn Scene>>,
+    integrated_titlebar: bool,
+    resizable: bool,
 }
 
 impl GameBuilder {
@@ -38,6 +40,8 @@ impl GameBuilder {
             width: None,
             height: None,
             scenes: vec![initial_scene],
+            integrated_titlebar: true,
+            resizable: true,
         }
     }
 
@@ -57,12 +61,22 @@ impl GameBuilder {
         self
     }
 
+    pub fn integrated_titlebar(mut self, integrated: bool) -> Self {
+        self.integrated_titlebar = integrated;
+        self
+    }
+
+    pub fn resizable(mut self, resizable: bool) -> Self {
+        self.resizable = resizable;
+        self
+    }
+
     pub fn build(self) -> Game {
         let title = self.title.unwrap_or_else(|| "libDQG Game".to_string());
         let width = self.width.unwrap_or(800);
         let height = self.height.unwrap_or(600);
 
-        let mut app = App::new(title, width, height);
+        let mut app = App::new(title, width, height, self.integrated_titlebar, self.resizable);
         for scene in self.scenes {
             app.add_scene(scene);
         }
