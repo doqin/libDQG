@@ -1,3 +1,4 @@
+#[derive(Clone, Copy)]
 pub struct Color {
     r: f64,
     g: f64,
@@ -6,8 +7,17 @@ pub struct Color {
 }
 
 impl Color {
+    /// Creates a new Color with the given RGBA values. Note that the values should be in the range [0.0, 1.0].
     pub fn new(r: f64, g: f64, b: f64, a: f64) -> Self {
         Self { r, g, b, a }
+    }
+
+    /// Creates a new Color from a hexadecimal value. The hex value should be in the format 0xRRGGBB.
+    pub fn from_hex(hex: u32) -> Self {
+        let r = ((hex >> 16) & 0xFF) as f64 / 255.0;
+        let g = ((hex >> 8) & 0xFF) as f64 / 255.0;
+        let b = (hex & 0xFF) as f64 / 255.0;
+        Self { r, g, b, a: 1.0 }
     }
 
     pub fn as_wgpu_color(&self) -> wgpu::Color {

@@ -4,6 +4,8 @@ pub mod renderer;
 pub mod scene;
 pub mod types;
 pub mod input;
+pub mod titlebar;
+pub mod platform;
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
