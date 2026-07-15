@@ -2,13 +2,14 @@ use winit::event_loop::EventLoop;
 use crate::scene::Scene;
 
 use crate::app::App;
+use crate::types::Color;
 
 pub struct Game {
     app: App<'static>,
 }
 
 impl Game {
-    pub fn new(app: App<'static>) -> Self {
+    pub(crate) fn new(app: App<'static>) -> Self {
         Self {
             app,
         }
@@ -30,6 +31,7 @@ pub struct GameBuilder {
     height: Option<u32>,
     scenes: Vec<Box<dyn Scene>>,
     integrated_titlebar: bool,
+    clear_color: Color,
     resizable: bool,
 }
 
@@ -41,6 +43,7 @@ impl GameBuilder {
             height: None,
             scenes: vec![initial_scene],
             integrated_titlebar: true,
+            clear_color: Color::from_hex(0x7391C8),
             resizable: true,
         }
     }
@@ -71,12 +74,17 @@ impl GameBuilder {
         self
     }
 
+    pub fn clear_color(mut self, clear_color: Color) -> Self {
+        self.clear_color = clear_color;
+        self
+    }
+
     pub fn build(self) -> Game {
         let title = self.title.unwrap_or_else(|| "libDQG Game".to_string());
         let width = self.width.unwrap_or(800);
         let height = self.height.unwrap_or(600);
 
-        let mut app = App::new(title, width, height, self.integrated_titlebar, self.resizable);
+        let mut app = App::new(title, width, height, self.integrated_titlebar, self.clear_color, self.resizable);
         for scene in self.scenes {
             app.add_scene(scene);
         }

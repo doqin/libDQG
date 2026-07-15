@@ -1,9 +1,13 @@
 pub mod types;
+pub mod texture;
+pub mod sprite;
 mod draw_pass;
 pub mod extras;
 
 pub use draw_pass::DrawPass;
 pub use types::*;
+pub use texture::Texture;
+pub use sprite::Sprite;
 
 use crate::types::Color;
 
@@ -16,6 +20,9 @@ pub struct Renderer<'a> {
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
     immediate_pipeline: RenderPipeline,
+    pub(crate) texture_bind_group_layout: wgpu::BindGroupLayout,
+    pub(crate) sampler: wgpu::Sampler,
+    pub(crate) sprite_pipeline: RenderPipeline,
 }
 
 impl<'a> Renderer<'a> {
@@ -62,6 +69,40 @@ impl<'a> Renderer<'a> {
 
         let shape_pipeline = extras::create_shape_pipeline(&device, config.format);
 
+        let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+            label: Some("texture_bind_group_layout"),
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let sprite_pipeline = extras::create_sprite_pipeline(&device, config.format, &texture_bind_group_layout);
+
         Self {
             device,
             surface,
@@ -69,6 +110,9 @@ impl<'a> Renderer<'a> {
             config,
             size,
             immediate_pipeline: shape_pipeline,
+            texture_bind_group_layout,
+            sampler,
+            sprite_pipeline,
         }
     }
 
@@ -122,6 +166,7 @@ impl<'a> Renderer<'a> {
                 device: &self.device,
                 queue: &self.queue,
                 immediate_pipeline: &self.immediate_pipeline,
+                sprite_pipeline: &self.sprite_pipeline,
                 screen_w: self.size.width,
                 screen_h: self.size.height,
             };

@@ -40,12 +40,13 @@ pub(crate) struct App<'a> {
     input_state: InputState,
     frame_start: Instant,
     titlebar: Option<TitleBar>,
+    clear_color: Color,
     resizable: bool,
     cursor_pos: (f32, f32),
 }
 
 impl<'a> App<'a> {
-    pub fn new(title: String, width: u32, height: u32, integrated_titlebar: bool, resizable: bool) -> Self {
+    pub fn new(title: String, width: u32, height: u32, integrated_titlebar: bool, clear_color: Color, resizable: bool) -> Self {
         let scene_manager = SceneManager::new();
         Self {
             title,
@@ -57,6 +58,7 @@ impl<'a> App<'a> {
             input_state: InputState::new(),
             frame_start: Instant::now(),
             titlebar: integrated_titlebar.then(|| TitleBar::new(resizable)),
+            clear_color: clear_color,
             resizable: resizable,
             cursor_pos: (0.0, 0.0),
         }
@@ -157,9 +159,10 @@ impl<'a> ApplicationHandler for App<'a> {
                 let frame_time = self.frame_start.elapsed();
                 self.frame_start = Instant::now();
                 // Handle redraw here
-                self.scene_manager.update(frame_time.as_secs_f32(), &self.input_state);
+                let renderer_opt = self.renderer.as_ref();
+                self.scene_manager.update(frame_time.as_secs_f32(), &self.input_state, renderer_opt);
                 if let Some(renderer) = self.renderer.as_mut() {
-                    let clear_color = Color::new(0.1, 0.2, 0.3, 1.0);
+                    let clear_color = self.clear_color;
                     let titlebar = &self.titlebar;
                     let window = self.window.as_ref().unwrap();
                     let maximized = window.is_maximized();

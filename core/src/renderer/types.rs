@@ -5,9 +5,6 @@ pub struct RenderPipeline(pub(crate) wgpu::RenderPipeline);
 pub struct Buffer(pub(crate) wgpu::Buffer);
 pub struct BindGroup(pub(crate) wgpu::BindGroup);
 pub struct BindGroupLayout(pub(crate) wgpu::BindGroupLayout);
-pub struct Sampler(pub(crate) wgpu::Sampler);
-pub struct Texture(pub(crate) wgpu::Texture);
-pub struct TextureView(pub(crate) wgpu::TextureView);
 
 // ===== Simple enums =====
 
