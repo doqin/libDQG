@@ -43,7 +43,7 @@ pub fn create_shape_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat)
         vertex: wgpu::VertexState {
             module: &vs_module,
             entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
+            buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &[
@@ -58,7 +58,7 @@ pub fn create_shape_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat)
                         shader_location: 1,
                     },
                 ],
-            }],
+            })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         primitive: wgpu::PrimitiveState {
@@ -125,7 +125,7 @@ pub fn create_sprite_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat
         vertex: wgpu::VertexState {
             module: &vs_module,
             entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
+            buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<SpriteVertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &[
@@ -145,7 +145,7 @@ pub fn create_sprite_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat
                         shader_location: 2,
                     },
                 ],
-            }],
+            })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         primitive: wgpu::PrimitiveState {

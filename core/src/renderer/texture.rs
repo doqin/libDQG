@@ -2,8 +2,6 @@ use crate::renderer::Renderer;
 use image::GenericImageView;
 
 pub struct Texture {
-    pub(crate) texture: wgpu::Texture,
-    pub(crate) view: wgpu::TextureView,
     pub(crate) bind_group: wgpu::BindGroup,
     pub width: u32,
     pub height: u32,
@@ -65,12 +63,10 @@ impl Texture {
             label: Some("diffuse_bind_group"),
         });
 
-        Ok(Self { 
-            texture, 
-            view, 
-            bind_group, 
-            width: dimensions.0, 
-            height: dimensions.1 
+        Ok(Self {
+            bind_group,
+            width: dimensions.0,
+            height: dimensions.1
         })
     }
 

@@ -44,9 +44,9 @@ static SMUG_TEXTURE: &[u8] = include_bytes!("../asset/textures/smug.png");
 
 impl Scene for MyScene {
     fn update(
-        &mut self, 
-        delta_time: f32, 
-        input_state: &InputState, 
+        &mut self,
+        delta_time: f32,
+        input_state: &InputState,
         renderer: Option<&libdqg::renderer::Renderer>
     ) -> SceneTransition {
         // === LOADING ===
@@ -93,7 +93,7 @@ impl Scene for MyScene {
         pass.draw_rect(self.rect_pos.x, self.rect_pos.y, 250.0, 180.0, 0.0, Color::new(0.0, 0.8, 0.0, 1.0));
         pass.draw_ellipse(500.0, 250.0, 90.0, 60.0, 32, 3.0, Color::new(1.0, 0.8, 0.0, 1.0));
         pass.draw_line(200.0, 400.0, 600.0, 500.0, 5.0, Color::new(0.0, 1.0, 1.0, 1.0));
-        
+
         if let Some(sprite) = &self.sample_sprite {
             sprite.draw(pass);
         }
@@ -106,7 +106,7 @@ fn main() {
         .title("My Game".into())
         .size(800, 600)
         .integrated_titlebar(true)
-        .clear_color(Color::from_hex(0xffffff))
+        // .clear_color(Color::from_hex(0x0))
         .resizable(false)
         .build();
     game.run();

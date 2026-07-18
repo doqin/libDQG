@@ -39,6 +39,7 @@ impl<'a> Renderer<'a> {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         }).await.expect("Failed to find an appropriate adapter");
 
         let (device, queue) = adapter.request_device(
@@ -64,6 +65,7 @@ impl<'a> Renderer<'a> {
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &config);
 
@@ -174,7 +176,7 @@ impl<'a> Renderer<'a> {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
+        self.queue.present(output);
     }
 
     pub fn create_shader_module(&self, desc: &ShaderModuleDescriptor) -> ShaderModule {
@@ -196,12 +198,12 @@ impl<'a> Renderer<'a> {
             })
             .collect();
 
-        let vertex_buffers: Vec<wgpu::VertexBufferLayout> = desc.vertex.buffers.iter().enumerate()
-            .map(|(i, vb)| wgpu::VertexBufferLayout {
+        let vertex_buffers: Vec<Option<wgpu::VertexBufferLayout>> = desc.vertex.buffers.iter().enumerate()
+            .map(|(i, vb)| Some(wgpu::VertexBufferLayout {
                 array_stride: vb.array_stride,
                 step_mode: vb.step_mode.to_wgpu(),
                 attributes: &attrs_per_buffer[i],
-            })
+            }))
             .collect();
 
         let primitive = wgpu::PrimitiveState {

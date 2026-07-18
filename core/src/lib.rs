@@ -7,6 +7,7 @@ pub mod input;
 pub mod titlebar;
 pub mod platform;
 pub mod util;
+pub mod camera;
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right

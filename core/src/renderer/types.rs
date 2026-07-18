@@ -4,7 +4,6 @@ pub struct ShaderModule(pub(crate) wgpu::ShaderModule);
 pub struct RenderPipeline(pub(crate) wgpu::RenderPipeline);
 pub struct Buffer(pub(crate) wgpu::Buffer);
 pub struct BindGroup(pub(crate) wgpu::BindGroup);
-pub struct BindGroupLayout(pub(crate) wgpu::BindGroupLayout);
 
 // ===== Simple enums =====
 
