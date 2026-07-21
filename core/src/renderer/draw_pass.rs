@@ -10,6 +10,8 @@ pub struct DrawPass<'a> {
     pub(crate) queue: &'a wgpu::Queue,
     pub(crate) immediate_pipeline: &'a RenderPipeline,
     pub(crate) sprite_pipeline: &'a RenderPipeline,
+    pub(crate) world_sprite_pipeline: &'a RenderPipeline,
+    pub(crate) camera_bind_group: &'a wgpu::BindGroup,
     pub(crate) screen_w: u32,
     pub(crate) screen_h: u32,
 }

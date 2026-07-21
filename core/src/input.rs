@@ -1,8 +1,10 @@
 use std::collections::HashSet;
 
+use crate::types::KeyCode;
+
 pub struct InputState {
-    keys_held: HashSet<crate::types::KeyCode>,
-    keys_pressed: HashSet<crate::types::KeyCode>,
+    keys_held: HashSet<KeyCode>,
+    keys_pressed: HashSet<KeyCode>,
 }
 
 impl InputState {
@@ -15,7 +17,7 @@ impl InputState {
 
     pub fn handle_event(&mut self, event: &winit::event::KeyEvent) {
         if let winit::keyboard::PhysicalKey::Code(keycode) = event.physical_key {
-            let native_keycode = match crate::types::KeyCode::from_winit_keycode(keycode) {
+            let native_keycode = match KeyCode::from_winit_keycode(keycode) {
                 Some(keycode) => keycode,
                 None => todo!("Handle unmapped keycode: {:?}", keycode),
             };
@@ -34,11 +36,19 @@ impl InputState {
         self.keys_pressed.clear();
     }
 
-    pub fn is_key_held(&self, keycode: crate::types::KeyCode) -> bool {
+    pub fn is_key_held(&self, keycode: KeyCode) -> bool {
         self.keys_held.contains(&keycode)
     }
 
-    pub fn is_key_pressed(&self, keycode: crate::types::KeyCode) -> bool {
+    pub fn is_key_pressed(&self, keycode: KeyCode) -> bool {
         self.keys_pressed.contains(&keycode)
+    }
+
+    pub fn keys_pressed(&self) -> impl Iterator<Item = KeyCode> + '_ {
+        self.keys_pressed.iter().copied()
+    }
+
+    pub fn keys_held(&self) -> impl Iterator<Item = KeyCode> + '_ {
+        self.keys_held.iter().copied()
     }
 }

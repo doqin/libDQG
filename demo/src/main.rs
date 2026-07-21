@@ -1,20 +1,20 @@
+mod camera_controller;
+
 use std::sync::Arc;
 
+use libdqg::Transformable;
 use libdqg::input::InputState;
 use libdqg::renderer::{DrawPass, Sprite, Texture};
 use libdqg::scene::{Scene, SceneTransition};
 use libdqg::game::GameBuilder;
 use libdqg::types::{Color, KeyCode};
 
-struct Pos {
-    x: f32,
-    y: f32,
-}
+use crate::camera_controller::CameraController;
 
 struct MyOtherScene;
 
 impl Scene for MyOtherScene {
-    fn update(&mut self, _delta_time: f32, input_state: &InputState, _renderer: Option<&libdqg::renderer::Renderer>) -> SceneTransition {
+    fn update(&mut self, _delta_time: f32, input_state: &InputState, _renderer: Option<&mut libdqg::renderer::Renderer>) -> SceneTransition {
         if input_state.is_key_pressed(KeyCode::Space) {
             return SceneTransition::Next;
         }
@@ -30,13 +30,18 @@ impl Scene for MyOtherScene {
 }
 
 struct MyScene {
-    rect_pos: Pos,
     sample_sprite: Option<Sprite>,
+    floor_sprite: Option<Sprite>,
+    camera_controller: CameraController,
 }
 
 impl MyScene {
-    fn new(rect_pos: Pos) -> Self {
-        Self { rect_pos, sample_sprite: None }
+    fn new() -> Self {
+        Self {
+            sample_sprite: None,
+            floor_sprite: None,
+            camera_controller: CameraController::new(5.0),
+        }
     }
 }
 
@@ -47,17 +52,33 @@ impl Scene for MyScene {
         &mut self,
         delta_time: f32,
         input_state: &InputState,
-        renderer: Option<&libdqg::renderer::Renderer>
+        renderer: Option<&mut libdqg::renderer::Renderer>
     ) -> SceneTransition {
         // === LOADING ===
-        if let Some(renderer) = renderer {
+        if let Some(renderer) = renderer.as_deref() {
             if self.sample_sprite.is_none() {
                 let texture = Arc::new(Texture::from_bytes(renderer, SMUG_TEXTURE)
                     .expect("Failed to create texture from bytes"));
                 let mut sprite = Sprite::new(texture);
-                sprite.width = 128.0;
-                sprite.height = 128.0;
+                // World-space sizes are in world units, not pixels. The camera
+                // sits ~2 units from the origin, so a pixel-sized quad would
+                // extend far behind the near plane and get clipped.
+                sprite.width = 1.0;
+                sprite.height = 1.0;
+                sprite.x = -0.5;
+                sprite.y = -0.5;
                 self.sample_sprite = Some(sprite);
+            }
+            if self.floor_sprite.is_none() {
+                let texture = Arc::new(Texture::from_bytes(renderer, SMUG_TEXTURE)
+                    .expect("Failed to create texture from bytes"));
+                let mut floor_sprite = Sprite::new(texture);
+                floor_sprite.width = 10.0;
+                floor_sprite.height = 10.0;
+                floor_sprite.x = -5.0;
+                floor_sprite.y = -5.0;
+                floor_sprite.rotate_x(90.0_f32.to_radians());
+                self.floor_sprite = Some(floor_sprite);
             }
         }
         // === LOGIC ===
@@ -67,41 +88,61 @@ impl Scene for MyScene {
         if input_state.is_key_pressed(KeyCode::Escape) {
             return SceneTransition::Quit;
         }
-        let mut dir = Pos { x: 0.0, y: 0.0 };
-        let velocity = 200.0;
+        let velocity = 5.0;
+        let rotation_speed = 180_f32.to_radians();
 
-        if input_state.is_key_held(KeyCode::ArrowUp) {
-            dir.y -= 1.0;
-        }
-        if input_state.is_key_held(KeyCode::ArrowDown) {
-            dir.y += 1.0;
-        }
-        if input_state.is_key_held(KeyCode::ArrowLeft) {
-            dir.x -= 1.0;
-        }
-        if input_state.is_key_held(KeyCode::ArrowRight) {
-            dir.x += 1.0;
-        }
         if let Some(sprite) = &mut self.sample_sprite {
-            sprite.x += dir.x * velocity * delta_time;
-            sprite.y += dir.y * velocity * delta_time;
+            if input_state.is_key_held(KeyCode::KeyW) {
+                sprite.translate3(glam::Vec3::new(0.0, 0.0, -1.0) * velocity * delta_time);
+            }
+            if input_state.is_key_held(KeyCode::KeyS) {
+                sprite.translate3(glam::Vec3::new(0.0, 0.0,1.0) * velocity * delta_time);
+            }
+            if input_state.is_key_held(KeyCode::KeyA) {
+                sprite.rotate_y(rotation_speed * delta_time);
+            }
+            if input_state.is_key_held(KeyCode::KeyD) {
+                sprite.rotate_y(-rotation_speed * delta_time);
+            }
+        }
+        if let Some(floor_sprite) = &mut self.floor_sprite {
+            if input_state.is_key_held(KeyCode::KeyE) {
+                floor_sprite.translate3(glam::Vec3::new(0.0, 0.0, -1.0) * velocity * delta_time);
+            }
+            if input_state.is_key_held(KeyCode::KeyQ) {
+                floor_sprite.translate3(glam::Vec3::new(0.0, 0.0, 1.0) * velocity * delta_time);
+            }
+        }
+
+        for code in input_state.keys_held() {
+            self.camera_controller.handle_key(code);
+        }
+        if let Some(renderer) = renderer {
+            let camera = renderer.camera_mut();
+            if let Some(sprite) = &self.sample_sprite {
+                camera.target = sprite.transform().transform_point3(glam::Vec3::ZERO);
+            }
+            self.camera_controller.update_camera(delta_time, camera);
         }
         SceneTransition::None
     }
 
     fn render(&mut self, pass: &mut DrawPass) {
-        pass.draw_rect(self.rect_pos.x, self.rect_pos.y, 250.0, 180.0, 0.0, Color::new(0.0, 0.8, 0.0, 1.0));
-        pass.draw_ellipse(500.0, 250.0, 90.0, 60.0, 32, 3.0, Color::new(1.0, 0.8, 0.0, 1.0));
-        pass.draw_line(200.0, 400.0, 600.0, 500.0, 5.0, Color::new(0.0, 1.0, 1.0, 1.0));
+        // pass.draw_rect(self.rect_pos.x, self.rect_pos.y, 250.0, 180.0, 0.0, Color::new(0.0, 0.8, 0.0, 1.0));
+        // pass.draw_ellipse(500.0, 250.0, 90.0, 60.0, 32, 3.0, Color::new(1.0, 0.8, 0.0, 1.0));
+        // pass.draw_line(200.0, 400.0, 600.0, 500.0, 5.0, Color::new(0.0, 1.0, 1.0, 1.0));
 
         if let Some(sprite) = &self.sample_sprite {
-            sprite.draw(pass);
+            sprite.draw_world(pass);
+        }
+        if let Some(floor_sprite) = &self.floor_sprite {
+            floor_sprite.draw_world(pass);
         }
     }
 }
 
 fn main() {
-    let mut game = GameBuilder::new(Box::new(MyScene::new(Pos { x: 100.0, y: 100.0 })))
+    let mut game = GameBuilder::new(Box::new(MyScene::new()))
         .add_scene(Box::new(MyOtherScene))
         .title("My Game".into())
         .size(800, 600)
