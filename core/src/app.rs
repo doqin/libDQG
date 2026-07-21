@@ -159,7 +159,7 @@ impl<'a> ApplicationHandler for App<'a> {
                 let frame_time = self.frame_start.elapsed();
                 self.frame_start = Instant::now();
                 // Handle redraw here
-                let renderer_opt = self.renderer.as_ref();
+                let renderer_opt = self.renderer.as_mut();
                 self.scene_manager.update(frame_time.as_secs_f32(), &self.input_state, renderer_opt);
                 if let Some(renderer) = self.renderer.as_mut() {
                     let clear_color = self.clear_color;

@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 libdqg = { path = "../core" }
 rand = "0.10.1"
+glam = "0.33.2"

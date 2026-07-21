@@ -1,13 +1,13 @@
 use crate::{
-    input::InputState, 
+    input::InputState,
     renderer::{DrawPass, Renderer},
 };
 
 pub trait Scene {
-    fn update(&mut self, delta_time: f32, input_state: &InputState, renderer: Option<&Renderer>) -> SceneTransition;
+    fn update(&mut self, delta_time: f32, input_state: &InputState, renderer: Option<&mut Renderer>) -> SceneTransition;
     fn render(&mut self, pass: &mut DrawPass);
 }
-    
+
 pub enum SceneTransition {
     None,
     Push(Box<dyn Scene>),
@@ -32,7 +32,7 @@ impl SceneManager {
         self.scenes.push(scene);
     }
 
-    pub fn update(&mut self, delta_time: f32, input_state: &InputState, renderer: Option<&Renderer>) {
+    pub fn update(&mut self, delta_time: f32, input_state: &InputState, renderer: Option<&mut Renderer>) {
         if let Some(current_scene) = self.scenes.get_mut(self.current_scene_index) {
             let transition = current_scene.update(delta_time, input_state, renderer);
             match transition {

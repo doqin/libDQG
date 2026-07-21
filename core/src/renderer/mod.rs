@@ -9,11 +9,14 @@ pub use types::*;
 pub use texture::Texture;
 pub use sprite::Sprite;
 
-use crate::types::Color;
+use crate::{camera::{Camera, CameraUniform}, types::Color};
 
 // ===== Renderer =====
 
 pub struct Renderer<'a> {
+    camera: Camera,
+    camera_uniform: CameraUniform,
+    pub(crate) camera_buffer: wgpu::Buffer,
     device: wgpu::Device,
     surface: wgpu::Surface<'a>,
     queue: wgpu::Queue,
@@ -23,6 +26,28 @@ pub struct Renderer<'a> {
     pub(crate) texture_bind_group_layout: wgpu::BindGroupLayout,
     pub(crate) sampler: wgpu::Sampler,
     pub(crate) sprite_pipeline: RenderPipeline,
+    pub(crate) world_sprite_pipeline: RenderPipeline,
+    pub(crate) camera_bind_group: wgpu::BindGroup,
+    depth_view: wgpu::TextureView,
+}
+
+/// Creates the depth buffer backing the main render pass, sized to the surface.
+fn create_depth_view(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> wgpu::TextureView {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Depth Texture"),
+        size: wgpu::Extent3d {
+            width: config.width.max(1),
+            height: config.height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: extras::DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 impl<'a> Renderer<'a> {
@@ -105,7 +130,63 @@ impl<'a> Renderer<'a> {
 
         let sprite_pipeline = extras::create_sprite_pipeline(&device, config.format, &texture_bind_group_layout);
 
+        let camera = Camera {
+            eye: glam::Vec3::new(0.0, 1.0, 2.0),
+            target: glam::Vec3::new(0.0, 0.0, 0.0),
+            up: glam::Vec3::new(0.0, 1.0, 0.0),
+            aspect: config.width as f32 / config.height as f32,
+            fov: 45.0,
+            znear: 0.1,
+            zfar: 100.0,
+        };
+        let mut camera_uniform = CameraUniform::new();
+        camera_uniform.update(&camera);
+
+        let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Camera Buffer"),
+            size: std::mem::size_of::<CameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&camera_buffer, 0, crate::util::slice_to_bytes(&[camera_uniform]));
+
+        let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+            label: Some("camera_bind_group_layout"),
+        });
+
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &camera_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+            ],
+            label: Some("camera_bind_group"),
+        });
+
+        let world_sprite_pipeline = extras::create_world_sprite_pipeline(
+            &device, config.format, &texture_bind_group_layout, &camera_bind_group_layout,
+        );
+
+        let depth_view = create_depth_view(&device, &config);
+
         Self {
+            camera,
+            camera_uniform,
+            camera_buffer,
             device,
             surface,
             queue,
@@ -115,7 +196,22 @@ impl<'a> Renderer<'a> {
             texture_bind_group_layout,
             sampler,
             sprite_pipeline,
+            world_sprite_pipeline,
+            camera_bind_group,
+            depth_view,
         }
+    }
+
+    /// Format of the depth buffer attached to the main render pass. Pipelines created through
+    /// [`Renderer::create_render_pipeline`] must use this format if they specify a depth state.
+    pub const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
+
+    pub fn camera(&self) -> &Camera {
+        &self.camera
+    }
+
+    pub fn camera_mut(&mut self) -> &mut Camera {
+        &mut self.camera
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -124,6 +220,8 @@ impl<'a> Renderer<'a> {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
+            self.depth_view = create_depth_view(&self.device, &self.config);
+            self.camera.aspect = new_size.width as f32 / new_size.height as f32;
         }
     }
 
@@ -132,6 +230,9 @@ impl<'a> Renderer<'a> {
     }
 
     pub fn render(&mut self, clear_color: Color, draw_fn: impl FnOnce(&mut DrawPass)) {
+        self.camera_uniform.update(&self.camera);
+        self.queue.write_buffer(&self.camera_buffer, 0, crate::util::slice_to_bytes(&[self.camera_uniform]));
+
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(surface_texture) => surface_texture,
             wgpu::CurrentSurfaceTexture::Suboptimal(surface_texture) => surface_texture,
@@ -158,7 +259,14 @@ impl<'a> Renderer<'a> {
                     },
                     depth_slice: None,
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
@@ -169,6 +277,8 @@ impl<'a> Renderer<'a> {
                 queue: &self.queue,
                 immediate_pipeline: &self.immediate_pipeline,
                 sprite_pipeline: &self.sprite_pipeline,
+                world_sprite_pipeline: &self.world_sprite_pipeline,
+                camera_bind_group: &self.camera_bind_group,
                 screen_w: self.size.width,
                 screen_h: self.size.height,
             };
@@ -216,7 +326,10 @@ impl<'a> Renderer<'a> {
             conservative: false,
         };
 
-        let depth_stencil = desc.depth_stencil.as_ref().map(|ds| wgpu::DepthStencilState {
+        // The main pass always carries a depth attachment, so a pipeline without a depth state
+        // would fail validation. Fall back to the screen-space state, which neither tests nor
+        // writes depth and so preserves plain draw-order painting.
+        let depth_stencil = Some(desc.depth_stencil.as_ref().map(|ds| wgpu::DepthStencilState {
             format: ds.format.to_wgpu(),
             depth_write_enabled: Some(ds.depth_write_enabled),
             depth_compare: Some(ds.depth_compare.to_wgpu()),
@@ -241,7 +354,7 @@ impl<'a> Renderer<'a> {
                 slope_scale: ds.bias.slope_scale,
                 clamp: ds.bias.clamp,
             },
-        });
+        }).unwrap_or_else(extras::overlay_depth_state));
 
         let multisample = wgpu::MultisampleState {
             count: desc.multisample.count,
