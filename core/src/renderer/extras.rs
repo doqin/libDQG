@@ -1,5 +1,4 @@
 use crate::renderer::DrawPass;
-use crate::renderer::types::RenderPipeline;
 use crate::types::Color;
 
 const VS_SRC: &str = include_str!("../../shaders/shape_pipeline_vs.wgsl");
@@ -57,7 +56,7 @@ struct WorldSpriteVertex {
     color: [f32; 4],
 }
 
-pub fn create_shape_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> RenderPipeline {
+pub fn create_shape_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
     let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Shape Shader VS"),
         source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(VS_SRC)),
@@ -136,10 +135,10 @@ pub fn create_shape_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat)
         multiview_mask: None,
         cache: None,
     });
-    RenderPipeline(wgpu_pipeline)
+    wgpu_pipeline
 }
 
-pub fn create_sprite_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat, texture_layout: &wgpu::BindGroupLayout) -> RenderPipeline {
+pub fn create_sprite_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat, texture_layout: &wgpu::BindGroupLayout) -> wgpu::RenderPipeline {
     let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Sprite Shader VS"),
         source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(SPRITE_VS_SRC)),
@@ -223,7 +222,7 @@ pub fn create_sprite_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat
         multiview_mask: None,
         cache: None,
     });
-    RenderPipeline(wgpu_pipeline)
+    wgpu_pipeline
 }
 
 pub fn create_world_sprite_pipeline(
@@ -231,7 +230,7 @@ pub fn create_world_sprite_pipeline(
     format: wgpu::TextureFormat,
     texture_layout: &wgpu::BindGroupLayout,
     camera_layout: &wgpu::BindGroupLayout,
-) -> RenderPipeline {
+) -> wgpu::RenderPipeline {
     let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("World Sprite Shader VS"),
         source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(WORLD_SPRITE_VS_SRC)),
@@ -315,7 +314,7 @@ pub fn create_world_sprite_pipeline(
         multiview_mask: None,
         cache: None,
     });
-    RenderPipeline(wgpu_pipeline)
+    wgpu_pipeline
 }
 
 impl DrawPass<'_> {
@@ -468,7 +467,7 @@ impl DrawPass<'_> {
             mapped_at_creation: false,
         });
         self.queue.write_buffer(&buffer, 0, data);
-        self.pass.set_pipeline(&self.immediate_pipeline.0);
+        self.pass.set_pipeline(&self.immediate_pipeline);
         self.pass.set_vertex_buffer(0, buffer.slice(..data.len() as u64));
         self.pass.draw(0..verts.len() as u32, 0..1);
     }
@@ -521,7 +520,7 @@ impl DrawPass<'_> {
             mapped_at_creation: false,
         });
         self.queue.write_buffer(&buffer, 0, data);
-        self.pass.set_pipeline(&self.sprite_pipeline.0);
+        self.pass.set_pipeline(&self.sprite_pipeline);
         self.pass.set_bind_group(0, bind_group, &[]);
         self.pass.set_vertex_buffer(0, buffer.slice(..data.len() as u64));
         self.pass.draw(0..verts.len() as u32, 0..1);
@@ -584,7 +583,7 @@ impl DrawPass<'_> {
             mapped_at_creation: false,
         });
         self.queue.write_buffer(&buffer, 0, data);
-        self.pass.set_pipeline(&self.world_sprite_pipeline.0);
+        self.pass.set_pipeline(&self.world_sprite_pipeline);
         self.pass.set_bind_group(0, bind_group, &[]);
         self.pass.set_bind_group(1, self.camera_bind_group, &[]);
         self.pass.set_vertex_buffer(0, buffer.slice(..data.len() as u64));

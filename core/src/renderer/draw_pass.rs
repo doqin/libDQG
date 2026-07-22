@@ -1,16 +1,14 @@
 use std::ops::Range;
 use crate::types::Color;
-use crate::renderer::types::{
-    Buffer, BindGroup, IndexFormat, RenderPipeline,
-};
+use crate::renderer::types::IndexFormat;
 
 pub struct DrawPass<'a> {
     pub(crate) pass: wgpu::RenderPass<'a>,
     pub(crate) device: &'a wgpu::Device,
     pub(crate) queue: &'a wgpu::Queue,
-    pub(crate) immediate_pipeline: &'a RenderPipeline,
-    pub(crate) sprite_pipeline: &'a RenderPipeline,
-    pub(crate) world_sprite_pipeline: &'a RenderPipeline,
+    pub(crate) immediate_pipeline: &'a wgpu::RenderPipeline,
+    pub(crate) sprite_pipeline: &'a wgpu::RenderPipeline,
+    pub(crate) world_sprite_pipeline: &'a wgpu::RenderPipeline,
     pub(crate) camera_bind_group: &'a wgpu::BindGroup,
     pub(crate) screen_w: u32,
     pub(crate) screen_h: u32,
@@ -41,20 +39,20 @@ impl DrawPass<'_> {
         self.pass.set_stencil_reference(reference);
     }
 
-    pub fn set_pipeline(&mut self, pipeline: &RenderPipeline) {
-        self.pass.set_pipeline(&pipeline.0);
+    pub fn set_pipeline(&mut self, pipeline: &wgpu::RenderPipeline) {
+        self.pass.set_pipeline(pipeline);
     }
 
-    pub fn set_vertex_buffer(&mut self, slot: u32, buffer: &Buffer, offset: u64, size: u64) {
-        self.pass.set_vertex_buffer(slot, buffer.0.slice(offset..offset + size));
+    pub fn set_vertex_buffer(&mut self, slot: u32, buffer: &wgpu::Buffer, offset: u64, size: u64) {
+        self.pass.set_vertex_buffer(slot, buffer.slice(offset..offset + size));
     }
 
-    pub fn set_index_buffer(&mut self, buffer: &Buffer, format: IndexFormat, offset: u64, size: u64) {
-        self.pass.set_index_buffer(buffer.0.slice(offset..offset + size), format.to_wgpu());
+    pub fn set_index_buffer(&mut self, buffer: &wgpu::Buffer, format: IndexFormat, offset: u64, size: u64) {
+        self.pass.set_index_buffer(buffer.slice(offset..offset + size), format.to_wgpu());
     }
 
-    pub fn set_bind_group(&mut self, group: u32, bind_group: &BindGroup, offsets: &[u32]) {
-        self.pass.set_bind_group(group, &bind_group.0, offsets);
+    pub fn set_bind_group(&mut self, group: u32, bind_group: &wgpu::BindGroup, offsets: &[u32]) {
+        self.pass.set_bind_group(group, bind_group, offsets);
     }
 
     pub fn push_debug_group(&mut self, label: &str) {

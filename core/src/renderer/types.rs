@@ -1,10 +1,3 @@
-// ===== Wrapper types (opaque to users, internally wrap wgpu) =====
-
-pub struct ShaderModule(pub(crate) wgpu::ShaderModule);
-pub struct RenderPipeline(pub(crate) wgpu::RenderPipeline);
-pub struct Buffer(pub(crate) wgpu::Buffer);
-pub struct BindGroup(pub(crate) wgpu::BindGroup);
-
 // ===== Simple enums =====
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,7 +338,7 @@ pub struct RenderPipelineDescriptor<'a> {
 }
 
 pub struct VertexState<'a> {
-    pub module: &'a ShaderModule,
+    pub module: &'a wgpu::ShaderModule,
     pub entry_point: &'a str,
     pub buffers: &'a [VertexBufferLayout<'a>],
 }
@@ -364,7 +357,7 @@ pub struct VertexAttribute {
 }
 
 pub struct FragmentState<'a> {
-    pub module: &'a ShaderModule,
+    pub module: &'a wgpu::ShaderModule,
     pub entry_point: &'a str,
     pub targets: &'a [ColorTargetState],
 }
