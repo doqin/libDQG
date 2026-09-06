@@ -3,7 +3,7 @@
 
 
 
-Another take on my previous game framework DX9GF (A DirectX 9 Game framework).
+Another take on my previous game framework [DX9GF](https://github.com/doqin/dx9gf) (A DirectX 9 Game framework).
 
 ## Building off of the good parts of DX9GF
 
