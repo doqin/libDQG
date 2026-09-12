@@ -1,6 +1,7 @@
 pub mod types;
 pub mod texture;
 pub mod sprite;
+pub mod model;
 mod draw_pass;
 pub mod extras;
 
@@ -8,6 +9,7 @@ pub use draw_pass::DrawPass;
 pub use types::*;
 pub use texture::Texture;
 pub use sprite::Sprite;
+pub use model::Model;
 
 use crate::{camera::{Camera, CameraUniform}, types::Color};
 
@@ -22,11 +24,13 @@ pub struct Renderer<'a> {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
-    immediate_pipeline: RenderPipeline,
+    immediate_pipeline: wgpu::RenderPipeline,
     pub(crate) texture_bind_group_layout: wgpu::BindGroupLayout,
     pub(crate) sampler: wgpu::Sampler,
-    pub(crate) sprite_pipeline: RenderPipeline,
-    pub(crate) world_sprite_pipeline: RenderPipeline,
+    pub(crate) sprite_pipeline: wgpu::RenderPipeline,
+    pub(crate) world_sprite_pipeline: wgpu::RenderPipeline,
+    pub(crate) model_pipeline: wgpu::RenderPipeline,
+    model_transform_bind_group_layout: wgpu::BindGroupLayout,
     pub(crate) camera_bind_group: wgpu::BindGroup,
     depth_view: wgpu::TextureView,
 }
@@ -181,6 +185,26 @@ impl<'a> Renderer<'a> {
             &device, config.format, &texture_bind_group_layout, &camera_bind_group_layout,
         );
 
+        let model_transform_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+            label: Some("model_transform_bind_group_layout"),
+        });
+
+        let model_pipeline = extras::create_model_pipeline(
+            &device, config.format, &texture_bind_group_layout, &camera_bind_group_layout, &model_transform_bind_group_layout,
+        );
+
         let depth_view = create_depth_view(&device, &config);
 
         Self {
@@ -197,6 +221,8 @@ impl<'a> Renderer<'a> {
             sampler,
             sprite_pipeline,
             world_sprite_pipeline,
+            model_pipeline,
+            model_transform_bind_group_layout,
             camera_bind_group,
             depth_view,
         }
@@ -278,6 +304,7 @@ impl<'a> Renderer<'a> {
                 immediate_pipeline: &self.immediate_pipeline,
                 sprite_pipeline: &self.sprite_pipeline,
                 world_sprite_pipeline: &self.world_sprite_pipeline,
+                model_pipeline: &self.model_pipeline,
                 camera_bind_group: &self.camera_bind_group,
                 screen_w: self.size.width,
                 screen_h: self.size.height,
@@ -289,15 +316,15 @@ impl<'a> Renderer<'a> {
         self.queue.present(output);
     }
 
-    pub fn create_shader_module(&self, desc: &ShaderModuleDescriptor) -> ShaderModule {
+    pub fn create_shader_module(&self, desc: &ShaderModuleDescriptor) -> wgpu::ShaderModule {
         let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: desc.label,
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(desc.source)),
         });
-        ShaderModule(module)
+        module
     }
 
-    pub fn create_render_pipeline(&self, desc: &RenderPipelineDescriptor) -> RenderPipeline {
+    pub fn create_render_pipeline(&self, desc: &RenderPipelineDescriptor) -> wgpu::RenderPipeline {
         let attrs_per_buffer: Vec<Vec<wgpu::VertexAttribute>> = desc.vertex.buffers.iter()
             .map(|vb| {
                 vb.attributes.iter().map(|a| wgpu::VertexAttribute {
@@ -390,7 +417,7 @@ impl<'a> Renderer<'a> {
             label: desc.label,
             layout: None,
             vertex: wgpu::VertexState {
-                module: &desc.vertex.module.0,
+                module: &desc.vertex.module,
                 entry_point: Some(desc.vertex.entry_point),
                 buffers: &vertex_buffers,
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -399,7 +426,7 @@ impl<'a> Renderer<'a> {
             depth_stencil,
             multisample,
             fragment: desc.fragment.as_ref().map(|frag| wgpu::FragmentState {
-                module: &frag.module.0,
+                module: &frag.module,
                 entry_point: Some(frag.entry_point),
                 targets: &color_targets,
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -409,10 +436,10 @@ impl<'a> Renderer<'a> {
         };
 
         let pipeline = self.device.create_render_pipeline(&wgpu_desc);
-        RenderPipeline(pipeline)
+        pipeline
     }
 
-    pub fn create_buffer_init(&self, desc: &BufferInitDescriptor) -> Buffer {
+    pub fn create_buffer_init(&self, desc: &BufferInitDescriptor) -> wgpu::Buffer {
         let usage = desc.usage.to_wgpu() | wgpu::BufferUsages::COPY_DST;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: desc.label,
@@ -421,16 +448,16 @@ impl<'a> Renderer<'a> {
             mapped_at_creation: false,
         });
         self.queue.write_buffer(&buffer, 0, desc.contents);
-        Buffer(buffer)
+        buffer
     }
 
-    pub fn create_buffer(&self, desc: &BufferDescriptor) -> Buffer {
+    pub fn create_buffer(&self, desc: &BufferDescriptor) -> wgpu::Buffer {
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: desc.label,
             size: desc.size,
             usage: desc.usage.to_wgpu(),
             mapped_at_creation: false,
         });
-        Buffer(buffer)
+        buffer
     }
 }

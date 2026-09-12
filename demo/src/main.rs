@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use libdqg::Transformable;
 use libdqg::input::InputState;
-use libdqg::renderer::{DrawPass, Sprite, Texture};
+use libdqg::renderer::{DrawPass, Model, Sprite, Texture};
 use libdqg::scene::{Scene, SceneTransition};
 use libdqg::game::GameBuilder;
 use libdqg::types::{Color, KeyCode};
@@ -32,6 +32,7 @@ impl Scene for MyOtherScene {
 struct MyScene {
     sample_sprite: Option<Sprite>,
     floor_sprite: Option<Sprite>,
+    sample_model: Option<Model>,
     camera_controller: CameraController,
 }
 
@@ -40,12 +41,11 @@ impl MyScene {
         Self {
             sample_sprite: None,
             floor_sprite: None,
+            sample_model: None,
             camera_controller: CameraController::new(5.0),
         }
     }
 }
-
-static SMUG_TEXTURE: &[u8] = include_bytes!("../asset/textures/smug.png");
 
 impl Scene for MyScene {
     fn update(
@@ -57,8 +57,8 @@ impl Scene for MyScene {
         // === LOADING ===
         if let Some(renderer) = renderer.as_deref() {
             if self.sample_sprite.is_none() {
-                let texture = Arc::new(Texture::from_bytes(renderer, SMUG_TEXTURE)
-                    .expect("Failed to create texture from bytes"));
+                let texture = Arc::new(Texture::from_path(renderer, "./res/textures/smug.png")
+                    .expect("Failed to create texture from path"));
                 let mut sprite = Sprite::new(texture);
                 // World-space sizes are in world units, not pixels. The camera
                 // sits ~2 units from the origin, so a pixel-sized quad would
@@ -70,8 +70,8 @@ impl Scene for MyScene {
                 self.sample_sprite = Some(sprite);
             }
             if self.floor_sprite.is_none() {
-                let texture = Arc::new(Texture::from_bytes(renderer, SMUG_TEXTURE)
-                    .expect("Failed to create texture from bytes"));
+                let texture = Arc::new(Texture::from_path(renderer, "./res/textures/floor.png")
+                    .expect("Failed to create texture from path"));
                 let mut floor_sprite = Sprite::new(texture);
                 floor_sprite.width = 10.0;
                 floor_sprite.height = 10.0;
@@ -79,6 +79,12 @@ impl Scene for MyScene {
                 floor_sprite.y = -5.0;
                 floor_sprite.rotate_x(90.0_f32.to_radians());
                 self.floor_sprite = Some(floor_sprite);
+            }
+            if self.sample_model.is_none() {
+                let mut model = Model::load(renderer, "./res/models/cube.obj")
+                    .expect("Failed to load model");
+                model.translate3(glam::Vec3::new(1.5, 0.5, -1.5));
+                self.sample_model = Some(model);
             }
         }
         // === LOGIC ===
@@ -113,6 +119,9 @@ impl Scene for MyScene {
                 floor_sprite.translate3(glam::Vec3::new(0.0, 0.0, 1.0) * velocity * delta_time);
             }
         }
+        if let Some(model) = &mut self.sample_model {
+            model.rotate_y(rotation_speed * 0.5 * delta_time);
+        }
 
         for code in input_state.keys_held() {
             self.camera_controller.handle_key(code);
@@ -137,6 +146,9 @@ impl Scene for MyScene {
         }
         if let Some(floor_sprite) = &self.floor_sprite {
             floor_sprite.draw_world(pass);
+        }
+        if let Some(model) = &self.sample_model {
+            pass.draw_model(model);
         }
     }
 }

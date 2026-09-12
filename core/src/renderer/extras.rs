@@ -1,5 +1,5 @@
 use crate::renderer::DrawPass;
-use crate::renderer::types::RenderPipeline;
+use crate::renderer::model::Model;
 use crate::types::Color;
 
 const VS_SRC: &str = include_str!("../../shaders/shape_pipeline_vs.wgsl");
@@ -9,6 +9,9 @@ const SPRITE_VS_SRC: &str = include_str!("../../shaders/sprite_pipeline_vs.wgsl"
 const SPRITE_FS_SRC: &str = include_str!("../../shaders/sprite_pipeline_fs.wgsl");
 
 const WORLD_SPRITE_VS_SRC: &str = include_str!("../../shaders/world_sprite_pipeline_vs.wgsl");
+
+const MODEL_VS_SRC: &str = include_str!("../../shaders/model_pipeline_vs.wgsl");
+const MODEL_FS_SRC: &str = include_str!("../../shaders/model_pipeline_fs.wgsl");
 
 /// Format of the renderer's depth buffer. Every pipeline drawn in the main pass must declare a
 /// depth-stencil state using this format.
@@ -37,12 +40,39 @@ pub(crate) fn world_depth_state() -> wgpu::DepthStencilState {
     }
 }
 
+trait Vertex {
+    fn desc() -> wgpu::VertexBufferLayout<'static>;
+}
+
+/// Vertex format for immediate-mode drawing of colored shapes (rects, lines, ellipses).
 #[repr(C)]
-struct Vertex {
+struct ImmediateVertex {
     pos: [f32; 2],
     color: [f32; 4],
 }
 
+impl Vertex for ImmediateVertex {
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<ImmediateVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: std::mem::size_of::<f32>() as u64 * 2,
+                    shader_location: 1,
+                },
+            ],
+        }
+    }
+}
+
+/// Vertex format for drawing textured sprites in screen space (UI/HUD elements).
 #[repr(C)]
 struct SpriteVertex {
     pos: [f32; 2],
@@ -50,6 +80,33 @@ struct SpriteVertex {
     color: [f32; 4],
 }
 
+impl Vertex for SpriteVertex {
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<SpriteVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: std::mem::size_of::<f32>() as u64 * 2,
+                    shader_location: 1,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: std::mem::size_of::<f32>() as u64 * 4,
+                    shader_location: 2,
+                },
+            ],
+        }
+    }
+}
+
+/// Vertex format for drawing textured sprites in world space (3D scene elements).
 #[repr(C)]
 struct WorldSpriteVertex {
     pos: [f32; 3],
@@ -57,7 +114,67 @@ struct WorldSpriteVertex {
     color: [f32; 4],
 }
 
-pub fn create_shape_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> RenderPipeline {
+impl Vertex for WorldSpriteVertex {
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<WorldSpriteVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: std::mem::size_of::<f32>() as u64 * 3,
+                    shader_location: 1,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: std::mem::size_of::<f32>() as u64 * 5,
+                    shader_location: 2,
+                },
+            ],
+        }
+    }
+}
+
+/// Vertex format for drawing 3D models with textures and normals.
+#[repr(C)]
+pub(crate) struct ModelVertex {
+    pub(crate) position: [f32; 3],
+    pub(crate) tex_coords: [f32; 2],
+    pub(crate) normal: [f32; 3],
+}
+
+impl Vertex for ModelVertex {
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<ModelVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: std::mem::size_of::<f32>() as u64 * 3,
+                    shader_location: 1,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: std::mem::size_of::<f32>() as u64 * 5,
+                    shader_location: 2,
+                },
+            ],
+        }
+    }
+}
+
+pub fn create_shape_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
     let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Shape Shader VS"),
         source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(VS_SRC)),
@@ -80,7 +197,7 @@ pub fn create_shape_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat)
             module: &vs_module,
             entry_point: Some("vs_main"),
             buffers: &[Some(wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<Vertex>() as u64,
+                array_stride: std::mem::size_of::<ImmediateVertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &[
                     wgpu::VertexAttribute {
@@ -136,10 +253,10 @@ pub fn create_shape_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat)
         multiview_mask: None,
         cache: None,
     });
-    RenderPipeline(wgpu_pipeline)
+    wgpu_pipeline
 }
 
-pub fn create_sprite_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat, texture_layout: &wgpu::BindGroupLayout) -> RenderPipeline {
+pub fn create_sprite_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat, texture_layout: &wgpu::BindGroupLayout) -> wgpu::RenderPipeline {
     let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Sprite Shader VS"),
         source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(SPRITE_VS_SRC)),
@@ -161,27 +278,7 @@ pub fn create_sprite_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat
         vertex: wgpu::VertexState {
             module: &vs_module,
             entry_point: Some("vs_main"),
-            buffers: &[Some(wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<SpriteVertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x2,
-                        offset: 0,
-                        shader_location: 0,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x2,
-                        offset: std::mem::size_of::<f32>() as u64 * 2,
-                        shader_location: 1,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x4,
-                        offset: std::mem::size_of::<f32>() as u64 * 4,
-                        shader_location: 2,
-                    },
-                ],
-            })],
+            buffers: &[Some(SpriteVertex::desc())],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         primitive: wgpu::PrimitiveState {
@@ -223,7 +320,7 @@ pub fn create_sprite_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat
         multiview_mask: None,
         cache: None,
     });
-    RenderPipeline(wgpu_pipeline)
+    wgpu_pipeline
 }
 
 pub fn create_world_sprite_pipeline(
@@ -231,7 +328,7 @@ pub fn create_world_sprite_pipeline(
     format: wgpu::TextureFormat,
     texture_layout: &wgpu::BindGroupLayout,
     camera_layout: &wgpu::BindGroupLayout,
-) -> RenderPipeline {
+) -> wgpu::RenderPipeline {
     let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("World Sprite Shader VS"),
         source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(WORLD_SPRITE_VS_SRC)),
@@ -253,27 +350,7 @@ pub fn create_world_sprite_pipeline(
         vertex: wgpu::VertexState {
             module: &vs_module,
             entry_point: Some("vs_main"),
-            buffers: &[Some(wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<WorldSpriteVertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x2,
-                        offset: std::mem::size_of::<f32>() as u64 * 3,
-                        shader_location: 1,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x4,
-                        offset: std::mem::size_of::<f32>() as u64 * 5,
-                        shader_location: 2,
-                    },
-                ],
-            })],
+            buffers: &[Some(WorldSpriteVertex::desc())],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         primitive: wgpu::PrimitiveState {
@@ -315,14 +392,87 @@ pub fn create_world_sprite_pipeline(
         multiview_mask: None,
         cache: None,
     });
-    RenderPipeline(wgpu_pipeline)
+    wgpu_pipeline
+}
+
+pub fn create_model_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    texture_layout: &wgpu::BindGroupLayout,
+    camera_layout: &wgpu::BindGroupLayout,
+    model_transform_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Model Shader VS"),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(MODEL_VS_SRC)),
+    });
+    let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Model Shader FS"),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(MODEL_FS_SRC)),
+    });
+
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Model Pipeline Layout"),
+        bind_group_layouts: &[Some(texture_layout), Some(camera_layout), Some(model_transform_layout)],
+        immediate_size: 0,
+    });
+
+    let wgpu_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Model Pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &vs_module,
+            entry_point: Some("vs_main"),
+            buffers: &[Some(ModelVertex::desc())],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(world_depth_state()),
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &fs_module,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    wgpu_pipeline
 }
 
 impl DrawPass<'_> {
     pub fn draw_rect(&mut self, x: f32, y: f32, w: f32, h: f32, thickness: f32, color: Color) {
         let c = color.as_wgpu_color();
         let rgba = [c.r as f32, c.g as f32, c.b as f32, c.a as f32];
-        let mut verts: Vec<Vertex> = Vec::new();
+        let mut verts: Vec<ImmediateVertex> = Vec::new();
 
         if thickness <= 0.0 {
             let x2 = x + w;
@@ -332,37 +482,37 @@ impl DrawPass<'_> {
             let p2 = self.to_clip(x, y2);
             let p3 = self.to_clip(x2, y2);
 
-            verts.push(Vertex { pos: p0, color: rgba });
-            verts.push(Vertex { pos: p1, color: rgba });
-            verts.push(Vertex { pos: p2, color: rgba });
-            verts.push(Vertex { pos: p1, color: rgba });
-            verts.push(Vertex { pos: p3, color: rgba });
-            verts.push(Vertex { pos: p2, color: rgba });
+            verts.push(ImmediateVertex { pos: p0, color: rgba });
+            verts.push(ImmediateVertex { pos: p1, color: rgba });
+            verts.push(ImmediateVertex { pos: p2, color: rgba });
+            verts.push(ImmediateVertex { pos: p1, color: rgba });
+            verts.push(ImmediateVertex { pos: p3, color: rgba });
+            verts.push(ImmediateVertex { pos: p2, color: rgba });
         } else {
             let th = thickness;
             for &(px, py) in &[
                 (x, y), (x + w, y), (x, y + th),
                 (x + w, y), (x + w, y + th), (x, y + th),
             ] {
-                verts.push(Vertex { pos: self.to_clip(px, py), color: rgba });
+                verts.push(ImmediateVertex { pos: self.to_clip(px, py), color: rgba });
             }
             for &(px, py) in &[
                 (x, y + h - th), (x + w, y + h - th), (x, y + h),
                 (x + w, y + h - th), (x + w, y + h), (x, y + h),
             ] {
-                verts.push(Vertex { pos: self.to_clip(px, py), color: rgba });
+                verts.push(ImmediateVertex { pos: self.to_clip(px, py), color: rgba });
             }
             for &(px, py) in &[
                 (x, y), (x + th, y), (x, y + h),
                 (x + th, y), (x + th, y + h), (x, y + h),
             ] {
-                verts.push(Vertex { pos: self.to_clip(px, py), color: rgba });
+                verts.push(ImmediateVertex { pos: self.to_clip(px, py), color: rgba });
             }
             for &(px, py) in &[
                 (x + w - th, y), (x + w, y), (x + w - th, y + h),
                 (x + w, y), (x + w, y + h), (x + w - th, y + h),
             ] {
-                verts.push(Vertex { pos: self.to_clip(px, py), color: rgba });
+                verts.push(ImmediateVertex { pos: self.to_clip(px, py), color: rgba });
             }
         }
 
@@ -390,12 +540,12 @@ impl DrawPass<'_> {
         let p3 = self.to_clip(x2 - px, y2 - py);
 
         let verts = vec![
-            Vertex { pos: p0, color: rgba },
-            Vertex { pos: p1, color: rgba },
-            Vertex { pos: p2, color: rgba },
-            Vertex { pos: p1, color: rgba },
-            Vertex { pos: p3, color: rgba },
-            Vertex { pos: p2, color: rgba },
+            ImmediateVertex { pos: p0, color: rgba },
+            ImmediateVertex { pos: p1, color: rgba },
+            ImmediateVertex { pos: p2, color: rgba },
+            ImmediateVertex { pos: p1, color: rgba },
+            ImmediateVertex { pos: p3, color: rgba },
+            ImmediateVertex { pos: p2, color: rgba },
         ];
 
         self.upload_and_draw(&verts);
@@ -419,9 +569,9 @@ impl DrawPass<'_> {
                 let a2 = (i + 1) as f32 * step;
                 let p1 = self.to_clip(cx + rx * a1.cos(), cy + ry * a1.sin());
                 let p2 = self.to_clip(cx + rx * a2.cos(), cy + ry * a2.sin());
-                verts.push(Vertex { pos: center, color: rgba });
-                verts.push(Vertex { pos: p1, color: rgba });
-                verts.push(Vertex { pos: p2, color: rgba });
+                verts.push(ImmediateVertex { pos: center, color: rgba });
+                verts.push(ImmediateVertex { pos: p1, color: rgba });
+                verts.push(ImmediateVertex { pos: p2, color: rgba });
             }
         } else {
             let hw = thickness * 0.5;
@@ -438,12 +588,12 @@ impl DrawPass<'_> {
                 let p_o2 = self.to_clip(cx + (rx + hw) * cos2, cy + (ry + hw) * sin2);
                 let p_i2 = self.to_clip(cx + (rx - hw) * cos2, cy + (ry - hw) * sin2);
 
-                verts.push(Vertex { pos: p_o1, color: rgba });
-                verts.push(Vertex { pos: p_i1, color: rgba });
-                verts.push(Vertex { pos: p_o2, color: rgba });
-                verts.push(Vertex { pos: p_i1, color: rgba });
-                verts.push(Vertex { pos: p_i2, color: rgba });
-                verts.push(Vertex { pos: p_o2, color: rgba });
+                verts.push(ImmediateVertex { pos: p_o1, color: rgba });
+                verts.push(ImmediateVertex { pos: p_i1, color: rgba });
+                verts.push(ImmediateVertex { pos: p_o2, color: rgba });
+                verts.push(ImmediateVertex { pos: p_i1, color: rgba });
+                verts.push(ImmediateVertex { pos: p_i2, color: rgba });
+                verts.push(ImmediateVertex { pos: p_o2, color: rgba });
             }
         }
 
@@ -456,7 +606,7 @@ impl DrawPass<'_> {
         [(x / w) * 2.0 - 1.0, -((y / h) * 2.0 - 1.0)]
     }
 
-    fn upload_and_draw(&mut self, verts: &[Vertex]) {
+    fn upload_and_draw(&mut self, verts: &[ImmediateVertex]) {
         if verts.is_empty() {
             return;
         }
@@ -468,7 +618,7 @@ impl DrawPass<'_> {
             mapped_at_creation: false,
         });
         self.queue.write_buffer(&buffer, 0, data);
-        self.pass.set_pipeline(&self.immediate_pipeline.0);
+        self.pass.set_pipeline(&self.immediate_pipeline);
         self.pass.set_vertex_buffer(0, buffer.slice(..data.len() as u64));
         self.pass.draw(0..verts.len() as u32, 0..1);
     }
@@ -521,7 +671,7 @@ impl DrawPass<'_> {
             mapped_at_creation: false,
         });
         self.queue.write_buffer(&buffer, 0, data);
-        self.pass.set_pipeline(&self.sprite_pipeline.0);
+        self.pass.set_pipeline(&self.sprite_pipeline);
         self.pass.set_bind_group(0, bind_group, &[]);
         self.pass.set_vertex_buffer(0, buffer.slice(..data.len() as u64));
         self.pass.draw(0..verts.len() as u32, 0..1);
@@ -584,10 +734,32 @@ impl DrawPass<'_> {
             mapped_at_creation: false,
         });
         self.queue.write_buffer(&buffer, 0, data);
-        self.pass.set_pipeline(&self.world_sprite_pipeline.0);
+        self.pass.set_pipeline(&self.world_sprite_pipeline);
         self.pass.set_bind_group(0, bind_group, &[]);
         self.pass.set_bind_group(1, self.camera_bind_group, &[]);
         self.pass.set_vertex_buffer(0, buffer.slice(..data.len() as u64));
         self.pass.draw(0..verts.len() as u32, 0..1);
+    }
+
+    /// Draws a loaded [`Model`] in world space, transformed by the camera and the model's own
+    /// transform. Each mesh is drawn with its assigned material's texture bound.
+    pub fn draw_model(&mut self, model: &Model) {
+        self.queue.write_buffer(
+            &model.transform_buffer,
+            0,
+            crate::util::slice_to_bytes(&[model.transform.to_cols_array_2d()]),
+        );
+
+        self.pass.set_pipeline(self.model_pipeline);
+        self.pass.set_bind_group(1, self.camera_bind_group, &[]);
+        self.pass.set_bind_group(2, &model.transform_bind_group, &[]);
+
+        for mesh in &model.meshes {
+            let material = &model.materials[mesh.material];
+            self.pass.set_bind_group(0, &material.diffuse_texture.bind_group, &[]);
+            self.pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+            self.pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            self.pass.draw_indexed(0..mesh.num_indices, 0, 0..1);
+        }
     }
 }
