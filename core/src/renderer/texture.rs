@@ -1,5 +1,6 @@
 use crate::renderer::Renderer;
 use image::GenericImageView;
+use std::path::Path;
 
 pub struct Texture {
     pub(crate) bind_group: wgpu::BindGroup,
@@ -70,12 +71,21 @@ impl Texture {
         })
     }
 
+    /// Creates a solid-color 1x1 texture. Used as a fallback for materials that don't
+    /// specify a diffuse texture.
+    pub fn from_color(renderer: &Renderer, color: [u8; 4]) -> Result<Self, String> {
+        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba(color));
+        Self::new(image::DynamicImage::ImageRgba8(img), renderer)
+    }
+
     pub fn from_bytes(renderer: &Renderer, bytes: &[u8]) -> Result<Self, String> {
         let img = image::load_from_memory(bytes).map_err(|e| format!("Failed to load image: {}", e))?;
         Self::new(img, renderer)
     }
-    pub fn from_path(renderer: &Renderer, path: &str) -> Result<Self, String> {
-        let img = image::open(path).map_err(|e| format!("Failed to load image: {}", e))?;
+    pub fn from_path(renderer: &Renderer, path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = crate::util::resolve_resource_path(path);
+        let img = image::open(&path)
+            .map_err(|e| format!("Failed to load image {}: {}", path.display(), e))?;
         Self::new(img, renderer)
     }
 }

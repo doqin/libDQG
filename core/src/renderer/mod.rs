@@ -1,6 +1,7 @@
 pub mod types;
 pub mod texture;
 pub mod sprite;
+pub mod model;
 mod draw_pass;
 pub mod extras;
 
@@ -8,6 +9,7 @@ pub use draw_pass::DrawPass;
 pub use types::*;
 pub use texture::Texture;
 pub use sprite::Sprite;
+pub use model::Model;
 
 use crate::{camera::{Camera, CameraUniform}, types::Color};
 
@@ -27,6 +29,8 @@ pub struct Renderer<'a> {
     pub(crate) sampler: wgpu::Sampler,
     pub(crate) sprite_pipeline: wgpu::RenderPipeline,
     pub(crate) world_sprite_pipeline: wgpu::RenderPipeline,
+    pub(crate) model_pipeline: wgpu::RenderPipeline,
+    model_transform_bind_group_layout: wgpu::BindGroupLayout,
     pub(crate) camera_bind_group: wgpu::BindGroup,
     depth_view: wgpu::TextureView,
 }
@@ -181,6 +185,26 @@ impl<'a> Renderer<'a> {
             &device, config.format, &texture_bind_group_layout, &camera_bind_group_layout,
         );
 
+        let model_transform_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+            label: Some("model_transform_bind_group_layout"),
+        });
+
+        let model_pipeline = extras::create_model_pipeline(
+            &device, config.format, &texture_bind_group_layout, &camera_bind_group_layout, &model_transform_bind_group_layout,
+        );
+
         let depth_view = create_depth_view(&device, &config);
 
         Self {
@@ -197,6 +221,8 @@ impl<'a> Renderer<'a> {
             sampler,
             sprite_pipeline,
             world_sprite_pipeline,
+            model_pipeline,
+            model_transform_bind_group_layout,
             camera_bind_group,
             depth_view,
         }
@@ -278,6 +304,7 @@ impl<'a> Renderer<'a> {
                 immediate_pipeline: &self.immediate_pipeline,
                 sprite_pipeline: &self.sprite_pipeline,
                 world_sprite_pipeline: &self.world_sprite_pipeline,
+                model_pipeline: &self.model_pipeline,
                 camera_bind_group: &self.camera_bind_group,
                 screen_w: self.size.width,
                 screen_h: self.size.height,
