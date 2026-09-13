@@ -1,6 +1,7 @@
 mod editor_scene;
 mod fly_camera;
 mod picking;
+mod project;
 mod ui;
 
 use editor_scene::EditorScene;
