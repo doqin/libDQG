@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use libdqg::camera::Camera;
@@ -10,11 +11,16 @@ use libdqg::world::{Renderable, Transform, World};
 
 use crate::fly_camera::FlyCamera;
 use crate::picking;
+use crate::project::{Project, RenderableAsset, RenderableKind};
 use crate::ui;
 
 pub struct EditorScene {
     world: World,
     selected: Option<Entity>,
+    renaming: Option<Entity>,
+    rename_buffer: String,
+    project: Option<Project>,
+    entity_assets: HashMap<Entity, RenderableAsset>,
     fly_camera: FlyCamera,
     last_mouse_pos: (f32, f32),
     seeded: bool,
@@ -40,6 +46,10 @@ impl EditorScene {
         Self {
             world: World::new(camera),
             selected: None,
+            renaming: None,
+            rename_buffer: String::new(),
+            project: None,
+            entity_assets: HashMap::new(),
             fly_camera: FlyCamera::new(6.0),
             last_mouse_pos: (0.0, 0.0),
             seeded: false,
@@ -54,21 +64,21 @@ impl EditorScene {
     fn seed_world(&mut self, renderer: &Renderer) {
         let mut model = Model::load(renderer, "./res/models/cube.obj").expect("Failed to load model");
         model.transform = glam::Mat4::IDENTITY;
-        self.world.spawn(
+        let cube = self.world.spawn_empty(
             "Cube",
             Transform { position: glam::Vec3::new(-1.2, 0.0, 0.0), ..Default::default() },
-            Renderable::Model(model),
         );
+        self.world.set_renderable(cube, Renderable::Model(model));
 
         let texture = Arc::new(Texture::from_path(renderer, "./res/textures/smug.png").expect("Failed to load texture"));
         let mut sprite = Sprite::new(texture);
         sprite.width = 1.0;
         sprite.height = 1.0;
-        self.world.spawn(
+        let sprite_entity = self.world.spawn_empty(
             "Sprite",
             Transform { position: glam::Vec3::new(1.2, 0.0, 0.0), ..Default::default() },
-            Renderable::Sprite(sprite),
         );
+        self.world.set_renderable(sprite_entity, Renderable::Sprite(sprite));
     }
 }
 
@@ -100,7 +110,7 @@ impl Scene for EditorScene {
             self.window = Some(window);
         }
 
-        if !self.seeded {
+        if self.project.is_none() && !self.seeded {
             self.seed_world(renderer);
             self.seeded = true;
         }
@@ -115,11 +125,78 @@ impl Scene for EditorScene {
 
         let world = &mut self.world;
         let selected = &mut self.selected;
+        let renaming = &mut self.renaming;
+        let rename_buffer = &mut self.rename_buffer;
+        let project = self.project.as_ref();
+        let entity_assets = &mut self.entity_assets;
+        let mut requests = ui::UiRequests::default();
         let full_output = self.egui_ctx.run_ui(raw_input, |ui| {
-            ui::draw(ui, world, selected);
+            ui::draw(ui, world, selected, renaming, rename_buffer, project, entity_assets, &mut requests);
         });
 
         egui_state.handle_platform_output(&window, full_output.platform_output.clone());
+
+        if let Some(root) = requests.new_project.take() {
+            match Project::create(root) {
+                Ok(project) => {
+                    self.world = World::new(self.world.camera);
+                    self.entity_assets.clear();
+                    self.selected = None;
+                    self.project = Some(project);
+                }
+                Err(e) => eprintln!("Failed to create project: {e}"),
+            }
+        }
+
+        if let Some(root) = requests.open_project.take() {
+            match Project::open(root).and_then(|project| project.load_scene().map(|scene| (project, scene))) {
+                Ok((project, scene_file)) => {
+                    self.world = World::new(self.world.camera);
+                    self.entity_assets.clear();
+                    self.selected = None;
+                    for record in scene_file.entities {
+                        let entity = self.world.spawn_empty(record.name, record.transform);
+                        if let Some(asset) = record.renderable {
+                            match asset.load(renderer, &project) {
+                                Ok(renderable) => {
+                                    self.world.set_renderable(entity, renderable);
+                                    self.entity_assets.insert(entity, asset);
+                                }
+                                Err(e) => eprintln!("Failed to load renderable: {e}"),
+                            }
+                        }
+                    }
+                    self.project = Some(project);
+                }
+                Err(e) => eprintln!("Failed to open project: {e}"),
+            }
+        }
+
+        if let Some((entity, kind, path)) = requests.attach_renderable.take() {
+            if let Some(project) = self.project.as_ref() {
+                let probe_asset = match kind {
+                    RenderableKind::Sprite => {
+                        RenderableAsset::Sprite { texture_path: path.clone(), width: 0.0, height: 0.0 }
+                    }
+                    RenderableKind::Model => RenderableAsset::Model { model_path: path.clone() },
+                };
+                match probe_asset.load(renderer, project) {
+                    Ok(renderable) => {
+                        // Re-derive the sprite's width/height from the loaded texture's native
+                        // size rather than trusting the placeholder above.
+                        let asset = match &renderable {
+                            Renderable::Sprite(sprite) => {
+                                RenderableAsset::Sprite { texture_path: path, width: sprite.width, height: sprite.height }
+                            }
+                            Renderable::Model(_) => RenderableAsset::Model { model_path: path },
+                        };
+                        self.world.set_renderable(entity, renderable);
+                        self.entity_assets.insert(entity, asset);
+                    }
+                    Err(e) => eprintln!("Failed to attach renderable: {e}"),
+                }
+            }
+        }
 
         if !self.egui_ctx.egui_wants_pointer_input() {
             self.fly_camera.update(delta_time, input_state, mouse_state, &mut self.world.camera, mouse_delta);

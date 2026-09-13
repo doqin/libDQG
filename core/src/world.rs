@@ -1,4 +1,5 @@
 use glam::{Mat4, Quat, Vec3};
+use serde::{Deserialize, Serialize};
 
 use crate::camera::Camera;
 use crate::ecs::entity::EntityAllocator;
@@ -10,7 +11,7 @@ use crate::transform::Transformable;
 /// inspector can show and edit them independently. The ECS component is the source of truth;
 /// [`Renderable::sync_transform`] copies it into the actual GPU-facing [`Sprite`]/[`Model`]
 /// matrix each frame via [`Transformable::set_transform`].
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Transform {
     pub position: Vec3,
     pub rotation: Quat,
@@ -92,12 +93,19 @@ impl World {
         }
     }
 
-    pub fn spawn(&mut self, name: impl Into<String>, transform: Transform, renderable: Renderable) -> Entity {
+    pub fn spawn_empty(&mut self, name: impl Into<String>, transform: Transform) -> Entity {
         let entity = self.allocator.spawn();
         self.names.insert(entity, Name(name.into()));
         self.transforms.insert(entity, transform);
-        self.renderables.insert(entity, renderable);
         entity
+    }
+
+    pub fn set_renderable(&mut self, entity: Entity, renderable: Renderable) {
+        self.renderables.insert(entity, renderable);
+    }
+
+    pub fn clear_renderable(&mut self, entity: Entity) {
+        self.renderables.remove(entity);
     }
 
     pub fn despawn(&mut self, entity: Entity) {
@@ -109,6 +117,12 @@ impl World {
 
     pub fn is_alive(&self, entity: Entity) -> bool {
         self.allocator.is_alive(entity)
+    }
+
+    /// Every live entity (every entity has a [`Transform`], so iterating that store enumerates
+    /// them all — unlike `renderables`, which only some entities have).
+    pub fn iter_entities(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.transforms.iter().map(|(entity, _)| entity)
     }
 
     /// Syncs every entity's ECS [`Transform`] into its [`Renderable`]'s own GPU-facing matrix.

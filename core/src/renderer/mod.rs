@@ -283,12 +283,13 @@ impl<'a> Renderer<'a> {
         TextureFormat::from_wgpu(self.config.format)
     }
 
-    /// Renders one frame: a main pass (color + depth, cleared) followed by an overlay pass
-    /// (color only, loaded not cleared, no depth test) on the same target before it's submitted
-    /// and presented.
+    /// Renders one frame: a main pass (color + depth, cleared), an overlay pass (color only,
+    /// loaded not cleared, no depth test, e.g. egui), then a post-overlay pass (same as the
+    /// overlay pass but drawn after it, e.g. a custom titlebar that must stay on top of an
+    /// egui-based editor UI) — all on the same target before it's submitted and presented.
     ///
-    /// `context` is threaded through to both closures as an explicit parameter, rather than
-    /// captured from the caller's environment, so the two `FnOnce`s can both reference the same
+    /// `context` is threaded through to all three closures as an explicit parameter, rather than
+    /// captured from the caller's environment, so the `FnOnce`s can both reference the same
     /// mutable state (e.g. a `SceneManager`) without the borrow checker seeing two simultaneous
     /// unique borrows of it — they run one after another, but as closure *values* they'd
     /// otherwise need to exist at the same time as arguments to this call.
@@ -298,6 +299,7 @@ impl<'a> Renderer<'a> {
         context: &mut T,
         draw_fn: impl FnOnce(&mut T, &mut DrawPass),
         overlay_fn: impl FnOnce(&mut T, &wgpu::Device, &wgpu::Queue, &mut wgpu::CommandEncoder, &wgpu::TextureView),
+        post_overlay_fn: impl FnOnce(&mut T, &mut DrawPass),
     ) {
         self.camera_uniform.update(&self.camera);
         self.queue.write_buffer(&self.camera_buffer, 0, crate::util::slice_to_bytes(&[self.camera_uniform]));
@@ -356,6 +358,51 @@ impl<'a> Renderer<'a> {
         }
 
         overlay_fn(context, &self.device, &self.queue, &mut encoder, &view);
+
+        {
+            let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Post-Overlay Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                // The built-in screen-space pipelines (used for e.g. the titlebar's
+                // draw_rect/draw_line calls) declare a Depth32Float depth-stencil state — even
+                // though they ignore it for depth testing — so the pass needs a matching
+                // attachment or wgpu rejects the pipeline as incompatible. Loading (not
+                // clearing) the same depth buffer the main pass just wrote is harmless here
+                // since nothing in this pass depth-tests against it.
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let mut draw_pass = DrawPass {
+                pass: render_pass,
+                device: &self.device,
+                queue: &self.queue,
+                immediate_pipeline: &self.immediate_pipeline,
+                sprite_pipeline: &self.sprite_pipeline,
+                world_sprite_pipeline: &self.world_sprite_pipeline,
+                model_pipeline: &self.model_pipeline,
+                camera_bind_group: &self.camera_bind_group,
+                screen_w: self.size.width,
+                screen_h: self.size.height,
+            };
+            post_overlay_fn(context, &mut draw_pass);
+        }
 
         self.queue.submit(std::iter::once(encoder.finish()));
         self.queue.present(output);

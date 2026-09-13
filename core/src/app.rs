@@ -182,13 +182,16 @@ impl<'a> ApplicationHandler for App<'a> {
                         &mut self.scene_manager,
                         |scene_manager, pass| {
                             scene_manager.render(pass);
-                            match titlebar.as_ref() {
-                                Some(tb) => tb.render(pass, screen_w, maximized),
-                                None => {},
-                            }
                         },
                         |scene_manager, device, queue, encoder, view| {
                             scene_manager.render_overlay(device, queue, encoder, view);
+                        },
+                        |_scene_manager, pass| {
+                            // Drawn after the overlay pass (e.g. egui) so the titlebar always
+                            // stays on top of an editor's UI rather than being painted over.
+                            if let Some(tb) = titlebar.as_ref() {
+                                tb.render(pass, screen_w, maximized);
+                            }
                         },
                     );
                 }
