@@ -16,6 +16,7 @@ impl CameraUniform {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct Camera {
     pub eye: glam::Vec3, // Camera position
     pub target: glam::Vec3, // Point the camera is looking at

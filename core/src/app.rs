@@ -5,7 +5,7 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::window::{CursorIcon, ResizeDirection, Window, WindowAttributes, WindowButtons, WindowId};
 use crate::scene::{Scene, SceneManager};
 use crate::renderer::Renderer;
-use crate::input::InputState;
+use crate::input::{InputState, MouseState};
 use crate::titlebar::{TitleBar, TitleBarButton, TitleBarHit};
 use crate::types::Color;
 
@@ -38,6 +38,7 @@ pub(crate) struct App<'a> {
     scene_manager: SceneManager,
     renderer: Option<Renderer<'a>>,
     input_state: InputState,
+    mouse_state: MouseState,
     frame_start: Instant,
     titlebar: Option<TitleBar>,
     clear_color: Color,
@@ -56,6 +57,7 @@ impl<'a> App<'a> {
             scene_manager,
             renderer: None,
             input_state: InputState::new(),
+            mouse_state: MouseState::new(),
             frame_start: Instant::now(),
             titlebar: integrated_titlebar.then(|| TitleBar::new(resizable)),
             clear_color: clear_color,
@@ -98,6 +100,7 @@ impl<'a> ApplicationHandler for App<'a> {
         _: WindowId,
         event: winit::event::WindowEvent,
     ) {
+        self.scene_manager.on_window_event(&event);
         match event {
             WindowEvent::KeyboardInput { event, .. } => {
                 self.input_state.handle_event(&event);
@@ -108,6 +111,7 @@ impl<'a> ApplicationHandler for App<'a> {
             },
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = (position.x as f32, position.y as f32);
+                self.mouse_state.set_position(self.cursor_pos.0, self.cursor_pos.1);
                 if let Some(window) = self.window.as_ref() {
                     let size = window.inner_size();
                     if let Some(ref mut titlebar) = self.titlebar {
@@ -124,29 +128,35 @@ impl<'a> ApplicationHandler for App<'a> {
                     window.set_cursor(cursor);
                 }
             },
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
-                if let Some(window) = self.window.clone() {
-                    let size = window.inner_size();
-                    let (x, y) = self.cursor_pos;
-                    let dir = if self.resizable {
-                        resize_direction(x, y, size.width as f32, size.height as f32)
-                    } else {
-                        None
-                    };
-                    if let Some(dir) = dir {
-                        let _ = window.drag_resize_window(dir);
-                    } else {
-                        if let Some(ref titlebar) = self.titlebar {
-                            match titlebar.hit_test(x, y, size.width as f32) {
-                                TitleBarHit::Button(TitleBarButton::Close) => event_loop.exit(),
-                                TitleBarHit::Button(TitleBarButton::Minimize) => window.set_minimized(true),
-                                TitleBarHit::Button(TitleBarButton::Maximize) => window.set_maximized(!window.is_maximized()),
-                                TitleBarHit::Drag => { let _ = window.drag_window(); },
-                                TitleBarHit::None => {},
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.mouse_state.handle_button(button, state);
+                if state == ElementState::Pressed && button == MouseButton::Left {
+                    if let Some(window) = self.window.clone() {
+                        let size = window.inner_size();
+                        let (x, y) = self.cursor_pos;
+                        let dir = if self.resizable {
+                            resize_direction(x, y, size.width as f32, size.height as f32)
+                        } else {
+                            None
+                        };
+                        if let Some(dir) = dir {
+                            let _ = window.drag_resize_window(dir);
+                        } else {
+                            if let Some(ref titlebar) = self.titlebar {
+                                match titlebar.hit_test(x, y, size.width as f32) {
+                                    TitleBarHit::Button(TitleBarButton::Close) => event_loop.exit(),
+                                    TitleBarHit::Button(TitleBarButton::Minimize) => window.set_minimized(true),
+                                    TitleBarHit::Button(TitleBarButton::Maximize) => window.set_maximized(!window.is_maximized()),
+                                    TitleBarHit::Drag => { let _ = window.drag_window(); },
+                                    TitleBarHit::None => {},
+                                }
                             }
                         }
                     }
                 }
+            },
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.mouse_state.handle_wheel(delta);
             },
             WindowEvent::Resized(physical_size) => {
                 if let Some(renderer) = self.renderer.as_mut() {
@@ -160,22 +170,30 @@ impl<'a> ApplicationHandler for App<'a> {
                 self.frame_start = Instant::now();
                 // Handle redraw here
                 let renderer_opt = self.renderer.as_mut();
-                self.scene_manager.update(frame_time.as_secs_f32(), &self.input_state, renderer_opt);
+                self.scene_manager.update(frame_time.as_secs_f32(), &self.input_state, &self.mouse_state, renderer_opt);
                 if let Some(renderer) = self.renderer.as_mut() {
                     let clear_color = self.clear_color;
                     let titlebar = &self.titlebar;
                     let window = self.window.as_ref().unwrap();
                     let maximized = window.is_maximized();
                     let screen_w = window.inner_size().width;
-                    renderer.render(clear_color, |pass| {
-                        self.scene_manager.render(pass);
-                        match titlebar.as_ref() {
-                            Some(tb) => tb.render(pass, screen_w, maximized),
-                            None => {},
-                        }
-                    });
+                    renderer.render(
+                        clear_color,
+                        &mut self.scene_manager,
+                        |scene_manager, pass| {
+                            scene_manager.render(pass);
+                            match titlebar.as_ref() {
+                                Some(tb) => tb.render(pass, screen_w, maximized),
+                                None => {},
+                            }
+                        },
+                        |scene_manager, device, queue, encoder, view| {
+                            scene_manager.render_overlay(device, queue, encoder, view);
+                        },
+                    );
                 }
                 self.input_state.clear_frame_states();
+                self.mouse_state.clear_frame_states();
                 // Request another redraw
                 self.window.as_ref().unwrap().request_redraw();
             },
