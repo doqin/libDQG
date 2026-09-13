@@ -3,7 +3,7 @@ mod camera_controller;
 use std::sync::Arc;
 
 use libdqg::Transformable;
-use libdqg::input::InputState;
+use libdqg::input::{InputState, MouseState};
 use libdqg::renderer::{DrawPass, Model, Sprite, Texture};
 use libdqg::scene::{Scene, SceneTransition};
 use libdqg::game::GameBuilder;
@@ -14,7 +14,7 @@ use crate::camera_controller::CameraController;
 struct MyOtherScene;
 
 impl Scene for MyOtherScene {
-    fn update(&mut self, _delta_time: f32, input_state: &InputState, _renderer: Option<&mut libdqg::renderer::Renderer>) -> SceneTransition {
+    fn update(&mut self, _delta_time: f32, input_state: &InputState, _mouse_state: &MouseState, _renderer: Option<&mut libdqg::renderer::Renderer>) -> SceneTransition {
         if input_state.is_key_pressed(KeyCode::Space) {
             return SceneTransition::Next;
         }
@@ -52,6 +52,7 @@ impl Scene for MyScene {
         &mut self,
         delta_time: f32,
         input_state: &InputState,
+        _mouse_state: &MouseState,
         renderer: Option<&mut libdqg::renderer::Renderer>
     ) -> SceneTransition {
         // === LOADING ===

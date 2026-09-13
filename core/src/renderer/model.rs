@@ -12,6 +12,11 @@ pub struct Model {
     /// Model matrix applied to every vertex in world space. Defaults to
     /// [`glam::Mat4::IDENTITY`]. Prefer building it up through the [`Transformable`] methods.
     pub transform: glam::Mat4,
+    /// Center of the model's bounding sphere, in local (pre-transform) space.
+    pub bounding_center: glam::Vec3,
+    /// Radius of the model's bounding sphere, in local (pre-transform) space. Computed once at
+    /// load time since the raw vertex positions aren't retained after upload to the GPU.
+    pub bounding_radius: f32,
     pub(crate) transform_buffer: wgpu::Buffer,
     pub(crate) transform_bind_group: wgpu::BindGroup,
 }
@@ -71,25 +76,34 @@ impl Model {
         }
         let fallback_material = materials.len() - 1;
 
+        let mut bounds_min = glam::Vec3::splat(f32::INFINITY);
+        let mut bounds_max = glam::Vec3::splat(f32::NEG_INFINITY);
+
         let meshes = obj_models
             .into_iter()
             .map(|obj_model| {
                 let mesh = obj_model.mesh;
                 let vertex_count = mesh.positions.len() / 3;
                 let vertices: Vec<ModelVertex> = (0..vertex_count)
-                    .map(|i| ModelVertex {
-                        position: [mesh.positions[i * 3], mesh.positions[i * 3 + 1], mesh.positions[i * 3 + 2]],
-                        tex_coords: if mesh.texcoords.is_empty() {
-                            [0.0, 0.0]
-                        } else {
-                            // OBJ texture coordinates are Y-up; wgpu textures are Y-down.
-                            [mesh.texcoords[i * 2], 1.0 - mesh.texcoords[i * 2 + 1]]
-                        },
-                        normal: if mesh.normals.is_empty() {
-                            [0.0, 0.0, 0.0]
-                        } else {
-                            [mesh.normals[i * 3], mesh.normals[i * 3 + 1], mesh.normals[i * 3 + 2]]
-                        },
+                    .map(|i| {
+                        let position = [mesh.positions[i * 3], mesh.positions[i * 3 + 1], mesh.positions[i * 3 + 2]];
+                        let p = glam::Vec3::from_array(position);
+                        bounds_min = bounds_min.min(p);
+                        bounds_max = bounds_max.max(p);
+                        ModelVertex {
+                            position,
+                            tex_coords: if mesh.texcoords.is_empty() {
+                                [0.0, 0.0]
+                            } else {
+                                // OBJ texture coordinates are Y-up; wgpu textures are Y-down.
+                                [mesh.texcoords[i * 2], 1.0 - mesh.texcoords[i * 2 + 1]]
+                            },
+                            normal: if mesh.normals.is_empty() {
+                                [0.0, 0.0, 0.0]
+                            } else {
+                                [mesh.normals[i * 3], mesh.normals[i * 3 + 1], mesh.normals[i * 3 + 2]]
+                            },
+                        }
                     })
                     .collect();
 
@@ -113,6 +127,12 @@ impl Model {
                 }
             })
             .collect();
+
+        let (bounding_center, bounding_radius) = if bounds_min.x.is_finite() {
+            ((bounds_min + bounds_max) * 0.5, (bounds_max - bounds_min).length() * 0.5)
+        } else {
+            (glam::Vec3::ZERO, 0.0)
+        };
 
         let transform_buffer = renderer.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Model Transform Buffer"),
@@ -138,6 +158,8 @@ impl Model {
             meshes,
             materials,
             transform: glam::Mat4::IDENTITY,
+            bounding_center,
+            bounding_radius,
             transform_buffer,
             transform_bind_group,
         })

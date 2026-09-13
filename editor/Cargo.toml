@@ -1,0 +1,15 @@
+[package]
+name = "editor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libdqg = { path = "../core" }
+wgpu = "30.0.0"
+winit = "0.30.13"
+egui = "0.36.2"
+egui-wgpu = "0.36.2"
+egui-winit = "0.36.2"
+
+[build-dependencies]
+libdqg = { path = "../core" }

@@ -19,6 +19,7 @@ pub struct Renderer<'a> {
     camera: Camera,
     camera_uniform: CameraUniform,
     pub(crate) camera_buffer: wgpu::Buffer,
+    window: std::sync::Arc<winit::window::Window>,
     device: wgpu::Device,
     surface: wgpu::Surface<'a>,
     queue: wgpu::Queue,
@@ -211,6 +212,7 @@ impl<'a> Renderer<'a> {
             camera,
             camera_uniform,
             camera_buffer,
+            window,
             device,
             surface,
             queue,
@@ -240,6 +242,32 @@ impl<'a> Renderer<'a> {
         &mut self.camera
     }
 
+    /// The window this renderer's surface was created from, as a cheap `Arc` clone. Useful for
+    /// consumers that need to integrate other window-aware systems (e.g. `egui-winit`) and cache
+    /// the handle for later (e.g. in a `Scene::on_window_event`, which isn't handed the renderer).
+    pub fn window(&self) -> std::sync::Arc<winit::window::Window> {
+        self.window.clone()
+    }
+
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    /// The raw `wgpu` format of the render surface, e.g. for configuring a third-party renderer
+    /// (like `egui-wgpu`) that needs to target the same surface. See also [`Renderer::surface_format`]
+    /// for the crate's own wrapper type.
+    pub fn wgpu_surface_format(&self) -> wgpu::TextureFormat {
+        self.config.format
+    }
+
+    pub fn size(&self) -> winit::dpi::PhysicalSize<u32> {
+        self.size
+    }
+
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
@@ -255,7 +283,22 @@ impl<'a> Renderer<'a> {
         TextureFormat::from_wgpu(self.config.format)
     }
 
-    pub fn render(&mut self, clear_color: Color, draw_fn: impl FnOnce(&mut DrawPass)) {
+    /// Renders one frame: a main pass (color + depth, cleared) followed by an overlay pass
+    /// (color only, loaded not cleared, no depth test) on the same target before it's submitted
+    /// and presented.
+    ///
+    /// `context` is threaded through to both closures as an explicit parameter, rather than
+    /// captured from the caller's environment, so the two `FnOnce`s can both reference the same
+    /// mutable state (e.g. a `SceneManager`) without the borrow checker seeing two simultaneous
+    /// unique borrows of it — they run one after another, but as closure *values* they'd
+    /// otherwise need to exist at the same time as arguments to this call.
+    pub fn render<T>(
+        &mut self,
+        clear_color: Color,
+        context: &mut T,
+        draw_fn: impl FnOnce(&mut T, &mut DrawPass),
+        overlay_fn: impl FnOnce(&mut T, &wgpu::Device, &wgpu::Queue, &mut wgpu::CommandEncoder, &wgpu::TextureView),
+    ) {
         self.camera_uniform.update(&self.camera);
         self.queue.write_buffer(&self.camera_buffer, 0, crate::util::slice_to_bytes(&[self.camera_uniform]));
 
@@ -309,8 +352,10 @@ impl<'a> Renderer<'a> {
                 screen_w: self.size.width,
                 screen_h: self.size.height,
             };
-            draw_fn(&mut draw_pass);
+            draw_fn(context, &mut draw_pass);
         }
+
+        overlay_fn(context, &self.device, &self.queue, &mut encoder, &view);
 
         self.queue.submit(std::iter::once(encoder.finish()));
         self.queue.present(output);

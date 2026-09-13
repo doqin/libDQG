@@ -52,3 +52,68 @@ impl InputState {
         self.keys_held.iter().copied()
     }
 }
+
+/// Per-frame mouse state: cursor position, button press/hold, and wheel motion.
+///
+/// Mirrors [`InputState`] but is tracked separately since it's fed from a different set of
+/// `winit` events and updated by different call sites in `App`.
+pub struct MouseState {
+    position: (f32, f32),
+    buttons_held: HashSet<winit::event::MouseButton>,
+    buttons_pressed: HashSet<winit::event::MouseButton>,
+    wheel_delta: f32,
+}
+
+impl MouseState {
+    pub fn new() -> Self {
+        Self {
+            position: (0.0, 0.0),
+            buttons_held: HashSet::new(),
+            buttons_pressed: HashSet::new(),
+            wheel_delta: 0.0,
+        }
+    }
+
+    pub fn set_position(&mut self, x: f32, y: f32) {
+        self.position = (x, y);
+    }
+
+    pub fn handle_button(&mut self, button: winit::event::MouseButton, state: winit::event::ElementState) {
+        if state.is_pressed() {
+            if !self.buttons_held.contains(&button) {
+                self.buttons_pressed.insert(button);
+            }
+            self.buttons_held.insert(button);
+        } else {
+            self.buttons_held.remove(&button);
+        }
+    }
+
+    pub fn handle_wheel(&mut self, delta: winit::event::MouseScrollDelta) {
+        self.wheel_delta += match delta {
+            winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+            winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 120.0,
+        };
+    }
+
+    pub fn clear_frame_states(&mut self) {
+        self.buttons_pressed.clear();
+        self.wheel_delta = 0.0;
+    }
+
+    pub fn position(&self) -> (f32, f32) {
+        self.position
+    }
+
+    pub fn is_button_held(&self, button: winit::event::MouseButton) -> bool {
+        self.buttons_held.contains(&button)
+    }
+
+    pub fn is_button_pressed(&self, button: winit::event::MouseButton) -> bool {
+        self.buttons_pressed.contains(&button)
+    }
+
+    pub fn wheel_delta(&self) -> f32 {
+        self.wheel_delta
+    }
+}
