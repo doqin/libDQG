@@ -16,6 +16,11 @@ pub struct Sprite {
     pub src_w: f32,
     pub src_h: f32,
     pub tint: Color,
+    /// RGBA overlay blended over the shaded sprite (`mix(shaded, highlight.rgb, highlight.a)`),
+    /// applied on top of `tint`'s multiplicative recolor rather than replacing it. Alpha 0 (the
+    /// default) means no highlight. Intended for editor-style hover/selection feedback; only
+    /// consumed by [`Sprite::draw_world`] — screen-space [`Sprite::draw`] ignores it.
+    pub highlight: Color,
     /// Model matrix applied to the quad in the sprite's local space, where the origin is the
     /// quad's anchor corner and the quad spans `(0, 0)..(width, height)`. The transformed quad
     /// is then positioned at `(x, y, z)`, so translation here is relative to that position.
@@ -39,6 +44,7 @@ impl Sprite {
             src_h: texture.height as f32,
             texture,
             tint: Color::new(1.0, 1.0, 1.0, 1.0),
+            highlight: Color::new(1.0, 1.0, 1.0, 0.0),
             transform: glam::Mat4::IDENTITY,
         }
     }
@@ -62,6 +68,7 @@ impl Sprite {
             self.src_x, self.src_y, self.src_w, self.src_h,
             self.texture.width as f32, self.texture.height as f32,
             self.tint,
+            self.highlight,
             self.transform,
             &self.texture.bind_group,
         );

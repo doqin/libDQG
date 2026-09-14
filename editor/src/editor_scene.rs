@@ -8,6 +8,7 @@ use libdqg::glam;
 use libdqg::input::{InputState, MouseState};
 use libdqg::renderer::{DrawPass, Renderer};
 use libdqg::scene::{Scene, SceneTransition};
+use libdqg::types::Color;
 use libdqg::world::{Renderable, World};
 
 use crate::egui_layer::EguiLayer;
@@ -43,6 +44,11 @@ enum LoadState {
 pub struct EditorScene {
     world: World,
     selected: Option<Entity>,
+    /// The entity currently under the mouse cursor in the 3D viewport, if any. Recomputed every
+    /// frame (unlike `selected`, which only changes on click) so the hovered model can blink.
+    hovered: Option<Entity>,
+    /// Elapsed time accumulator driving the hover blink, in seconds.
+    hover_blink_time: f32,
     renaming: Option<Entity>,
     rename_buffer: String,
     project: Option<Project>,
@@ -72,6 +78,8 @@ impl EditorScene {
         Self {
             world: World::new(camera),
             selected: None,
+            hovered: None,
+            hover_blink_time: 0.0,
             renaming: None,
             rename_buffer: String::new(),
             project: None,
@@ -113,6 +121,7 @@ impl EditorScene {
         self.world = World::new(self.world.camera);
         self.entity_assets.clear();
         self.selected = None;
+        self.hovered = None;
         self.texture_previews.clear();
 
         let entities: VecDeque<EntityRecord> = if create {
@@ -252,15 +261,21 @@ impl Scene for EditorScene {
             }
         }
 
+        self.hover_blink_time += delta_time;
+
         if !self.egui.wants_pointer_input() {
             self.fly_camera.update(delta_time, input_state, mouse_state, &mut self.world.camera, mouse_delta);
 
+            let size = renderer.size();
+            let ndc_x = (mouse_pos.0 / (size.width.max(1) as f32)) * 2.0 - 1.0;
+            let ndc_y = 1.0 - (mouse_pos.1 / (size.height.max(1) as f32)) * 2.0;
+            self.hovered = picking::pick(&self.world, &self.world.camera, ndc_x, ndc_y);
+
             if mouse_state.is_button_pressed(winit::event::MouseButton::Left) {
-                let size = renderer.size();
-                let ndc_x = (mouse_pos.0 / (size.width.max(1) as f32)) * 2.0 - 1.0;
-                let ndc_y = 1.0 - (mouse_pos.1 / (size.height.max(1) as f32)) * 2.0;
-                self.selected = picking::pick(&self.world, &self.world.camera, ndc_x, ndc_y);
+                self.selected = self.hovered;
             }
+        } else {
+            self.hovered = None;
         }
 
         self.world.sync_transforms();
@@ -272,10 +287,32 @@ impl Scene for EditorScene {
     }
 
     fn render(&mut self, pass: &mut DrawPass) {
-        for (_, renderable) in self.world.renderables.iter() {
+        let blink_alpha = 0.15 + 0.35 * (self.hover_blink_time * 6.0).sin().abs();
+        let hover_highlight = Color::new(1.0, 1.0, 1.0, blink_alpha as f64);
+        let no_highlight = Color::new(1.0, 1.0, 1.0, 0.0);
+
+        for (entity, renderable) in self.world.renderables.iter_mut() {
+            let highlight = if self.hovered == Some(entity) { hover_highlight } else { no_highlight };
+            let is_selected = self.selected == Some(entity);
+
             match renderable {
-                Renderable::Sprite(sprite) => sprite.draw_world(pass),
-                Renderable::Model(model) => pass.draw_model(model),
+                Renderable::Sprite(sprite) => {
+                    sprite.highlight = highlight;
+                    // The outline is coplanar with the sprite and relies on draw order (not
+                    // depth testing) to stay confined to a border — see
+                    // `draw_world_sprite_outline`'s doc comment — so it must be drawn first.
+                    if is_selected {
+                        pass.draw_world_sprite_outline(sprite.x, sprite.y, sprite.z, sprite.width, sprite.height, sprite.transform);
+                    }
+                    sprite.draw_world(pass);
+                }
+                Renderable::Model(model) => {
+                    model.highlight = highlight;
+                    pass.draw_model(model);
+                    if is_selected {
+                        pass.draw_model_outline(model);
+                    }
+                }
             }
         }
     }

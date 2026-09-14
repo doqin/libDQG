@@ -30,7 +30,9 @@ pub struct Renderer<'a> {
     pub(crate) sampler: wgpu::Sampler,
     pub(crate) sprite_pipeline: wgpu::RenderPipeline,
     pub(crate) world_sprite_pipeline: wgpu::RenderPipeline,
+    pub(crate) world_sprite_outline_pipeline: wgpu::RenderPipeline,
     pub(crate) model_pipeline: wgpu::RenderPipeline,
+    pub(crate) model_outline_pipeline: wgpu::RenderPipeline,
     model_transform_bind_group_layout: wgpu::BindGroupLayout,
     pub(crate) camera_bind_group: wgpu::BindGroup,
     depth_view: wgpu::TextureView,
@@ -185,12 +187,17 @@ impl<'a> Renderer<'a> {
         let world_sprite_pipeline = extras::create_world_sprite_pipeline(
             &device, config.format, &texture_bind_group_layout, &camera_bind_group_layout,
         );
+        let world_sprite_outline_pipeline = extras::create_world_sprite_outline_pipeline(
+            &device, config.format, &camera_bind_group_layout,
+        );
 
         let model_transform_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    // Read by both the model fragment shader (tint mixing) and the outline
+                    // vertex shader (model matrix), in addition to the model vertex shader.
+                    visibility: wgpu::ShaderStages::VERTEX.union(wgpu::ShaderStages::FRAGMENT),
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -204,6 +211,9 @@ impl<'a> Renderer<'a> {
 
         let model_pipeline = extras::create_model_pipeline(
             &device, config.format, &texture_bind_group_layout, &camera_bind_group_layout, &model_transform_bind_group_layout,
+        );
+        let model_outline_pipeline = extras::create_model_outline_pipeline(
+            &device, config.format, &camera_bind_group_layout, &model_transform_bind_group_layout,
         );
 
         let depth_view = create_depth_view(&device, &config);
@@ -223,7 +233,9 @@ impl<'a> Renderer<'a> {
             sampler,
             sprite_pipeline,
             world_sprite_pipeline,
+            world_sprite_outline_pipeline,
             model_pipeline,
+            model_outline_pipeline,
             model_transform_bind_group_layout,
             camera_bind_group,
             depth_view,
@@ -349,7 +361,9 @@ impl<'a> Renderer<'a> {
                 immediate_pipeline: &self.immediate_pipeline,
                 sprite_pipeline: &self.sprite_pipeline,
                 world_sprite_pipeline: &self.world_sprite_pipeline,
+                world_sprite_outline_pipeline: &self.world_sprite_outline_pipeline,
                 model_pipeline: &self.model_pipeline,
+                model_outline_pipeline: &self.model_outline_pipeline,
                 camera_bind_group: &self.camera_bind_group,
                 screen_w: self.size.width,
                 screen_h: self.size.height,
@@ -396,7 +410,9 @@ impl<'a> Renderer<'a> {
                 immediate_pipeline: &self.immediate_pipeline,
                 sprite_pipeline: &self.sprite_pipeline,
                 world_sprite_pipeline: &self.world_sprite_pipeline,
+                world_sprite_outline_pipeline: &self.world_sprite_outline_pipeline,
                 model_pipeline: &self.model_pipeline,
+                model_outline_pipeline: &self.model_outline_pipeline,
                 camera_bind_group: &self.camera_bind_group,
                 screen_w: self.size.width,
                 screen_h: self.size.height,
