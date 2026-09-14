@@ -14,6 +14,7 @@ serde = { version = "1", features = ["derive"] }
 ron = "0.8"
 rfd = "0.15"
 anyhow = "1.0"
+image = "0.25"
 
 [build-dependencies]
 libdqg = { path = "../core" }

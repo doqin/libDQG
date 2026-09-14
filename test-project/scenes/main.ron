@@ -1,0 +1,52 @@
+(
+    entities: [
+        (
+            name: "kako_1",
+            transform: (
+                position: (-2.3, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            renderable: Some(Model(
+                model_path: "assets\\models\\cube.obj",
+            )),
+        ),
+        (
+            name: "kako_2",
+            transform: (
+                position: (1.65, 0.0, 0.0),
+                rotation: (0.0031201467, -0.56413746, 0.21000104, 0.7985229),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            renderable: Some(Model(
+                model_path: "assets\\models\\cube.obj",
+            )),
+        ),
+        (
+            name: "kako_3",
+            transform: (
+                position: (-1.2, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            renderable: Some(Sprite(
+                texture_path: "assets\\textures\\kako.png",
+                width: 1.0,
+                height: 1.0,
+            )),
+        ),
+        (
+            name: "marx",
+            transform: (
+                position: (0.0, 1.3, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            renderable: Some(Sprite(
+                texture_path: "assets\\textures\\329009.jpg",
+                width: 1.0,
+                height: 0.5625,
+            )),
+        ),
+    ],
+)
