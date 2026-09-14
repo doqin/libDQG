@@ -1,7 +1,7 @@
 (
     entities: [
         (
-            name: "kako_1",
+            name: "kako_cube_1",
             transform: (
                 position: (-2.3, 0.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -12,7 +12,7 @@
             )),
         ),
         (
-            name: "kako_2",
+            name: "kako_cube_2",
             transform: (
                 position: (1.65, 0.0, 0.0),
                 rotation: (0.0031201467, -0.56413746, 0.21000104, 0.7985229),
@@ -23,7 +23,7 @@
             )),
         ),
         (
-            name: "kako_3",
+            name: "kako_sprite",
             transform: (
                 position: (-1.2, 0.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -46,6 +46,17 @@
                 texture_path: "assets\\textures\\329009.jpg",
                 width: 1.0,
                 height: 0.5625,
+            )),
+        ),
+        (
+            name: "kako_ball",
+            transform: (
+                position: (0.0, 0.0, 4.3),
+                rotation: (-0.0, -0.6087614, 0.0, 0.7933533),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            renderable: Some(Model(
+                model_path: "assets\\models\\kakoball.obj",
             )),
         ),
     ],
