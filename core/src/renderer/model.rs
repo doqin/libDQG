@@ -5,6 +5,17 @@ use crate::renderer::extras::ModelVertex;
 use crate::renderer::types::{BufferInitDescriptor, BufferUsage};
 use crate::renderer::{Renderer, Texture};
 use crate::transform::Transformable;
+use crate::types::Color;
+
+/// Per-model uniform data: the model matrix plus an optional highlight overlay (see
+/// [`Model::highlight`]), laid out to match the `ModelTransform` struct declared in
+/// `model_pipeline_vs.wgsl`/`_fs.wgsl` and `model_outline_vs.wgsl`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ModelUniform {
+    pub(crate) model: [[f32; 4]; 4],
+    pub(crate) highlight: [f32; 4],
+}
 
 pub struct Model {
     pub meshes: Vec<Mesh>,
@@ -12,6 +23,11 @@ pub struct Model {
     /// Model matrix applied to every vertex in world space. Defaults to
     /// [`glam::Mat4::IDENTITY`]. Prefer building it up through the [`Transformable`] methods.
     pub transform: glam::Mat4,
+    /// RGBA overlay blended over the model's shaded color
+    /// (`mix(shaded, highlight.rgb, highlight.a)` in the fragment shader). Alpha 0 (the default)
+    /// means no highlight at all. Intended for editor-style hover/selection feedback rather than
+    /// gameplay use.
+    pub highlight: Color,
     /// Center of the model's bounding sphere, in local (pre-transform) space.
     pub bounding_center: glam::Vec3,
     /// Radius of the model's bounding sphere, in local (pre-transform) space. Computed once at
@@ -27,6 +43,12 @@ pub struct Mesh {
     pub index_buffer: wgpu::Buffer,
     pub num_indices: u32,
     pub material: usize,
+    /// Local-space vertex positions, retained after upload to the GPU so callers (e.g. the
+    /// editor's ray/triangle picking) can test against the actual mesh geometry rather than just
+    /// its bounding sphere.
+    pub positions: Vec<glam::Vec3>,
+    /// Triangle-list indices into `positions`, retained alongside it for the same reason.
+    pub indices: Vec<u32>,
 }
 
 pub struct Material {
@@ -118,12 +140,16 @@ impl Model {
                     usage: BufferUsage::Index,
                 });
 
+                let positions: Vec<glam::Vec3> = vertices.iter().map(|v| glam::Vec3::from_array(v.position)).collect();
+
                 Mesh {
                     name: obj_model.name,
                     vertex_buffer,
                     index_buffer,
                     num_indices: mesh.indices.len() as u32,
                     material: mesh.material_id.unwrap_or(fallback_material).min(fallback_material),
+                    positions,
+                    indices: mesh.indices,
                 }
             })
             .collect();
@@ -136,14 +162,17 @@ impl Model {
 
         let transform_buffer = renderer.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Model Transform Buffer"),
-            size: std::mem::size_of::<[[f32; 4]; 4]>() as u64,
+            size: std::mem::size_of::<ModelUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         renderer.queue.write_buffer(
             &transform_buffer,
             0,
-            crate::util::slice_to_bytes(&[glam::Mat4::IDENTITY.to_cols_array_2d()]),
+            crate::util::slice_to_bytes(&[ModelUniform {
+                model: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                highlight: [1.0, 1.0, 1.0, 0.0],
+            }]),
         );
         let transform_bind_group = renderer.device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &renderer.model_transform_bind_group_layout,
@@ -158,6 +187,7 @@ impl Model {
             meshes,
             materials,
             transform: glam::Mat4::IDENTITY,
+            highlight: Color::new(1.0, 1.0, 1.0, 0.0),
             bounding_center,
             bounding_radius,
             transform_buffer,

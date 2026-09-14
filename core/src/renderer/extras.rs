@@ -1,5 +1,5 @@
 use crate::renderer::DrawPass;
-use crate::renderer::model::Model;
+use crate::renderer::model::{Model, ModelUniform};
 use crate::types::Color;
 
 const VS_SRC: &str = include_str!("../../shaders/shape_pipeline_vs.wgsl");
@@ -9,9 +9,15 @@ const SPRITE_VS_SRC: &str = include_str!("../../shaders/sprite_pipeline_vs.wgsl"
 const SPRITE_FS_SRC: &str = include_str!("../../shaders/sprite_pipeline_fs.wgsl");
 
 const WORLD_SPRITE_VS_SRC: &str = include_str!("../../shaders/world_sprite_pipeline_vs.wgsl");
+const WORLD_SPRITE_FS_SRC: &str = include_str!("../../shaders/world_sprite_pipeline_fs.wgsl");
+
+const WORLD_SPRITE_OUTLINE_VS_SRC: &str = include_str!("../../shaders/world_sprite_outline_vs.wgsl");
 
 const MODEL_VS_SRC: &str = include_str!("../../shaders/model_pipeline_vs.wgsl");
 const MODEL_FS_SRC: &str = include_str!("../../shaders/model_pipeline_fs.wgsl");
+
+const MODEL_OUTLINE_VS_SRC: &str = include_str!("../../shaders/model_outline_vs.wgsl");
+const MODEL_OUTLINE_FS_SRC: &str = include_str!("../../shaders/model_outline_fs.wgsl");
 
 /// Format of the renderer's depth buffer. Every pipeline drawn in the main pass must declare a
 /// depth-stencil state using this format.
@@ -35,6 +41,19 @@ pub(crate) fn world_depth_state() -> wgpu::DepthStencilState {
         format: DEPTH_FORMAT,
         depth_write_enabled: Some(true),
         depth_compare: Some(wgpu::CompareFunction::Less),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+/// Depth state for the model outline pass: tested (so the expanded shell's back faces stay
+/// hidden behind the real, un-expanded mesh everywhere but the silhouette rim) but never written,
+/// so the outline never occludes anything else drawn afterward.
+pub(crate) fn outline_depth_state() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: DEPTH_FORMAT,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::LessEqual),
         stencil: wgpu::StencilState::default(),
         bias: wgpu::DepthBiasState::default(),
     }
@@ -106,12 +125,18 @@ impl Vertex for SpriteVertex {
     }
 }
 
-/// Vertex format for drawing textured sprites in world space (3D scene elements).
+/// Vertex format for drawing textured sprites in world space (3D scene elements). `normal` and
+/// `highlight` are both already in their final form (computed once per draw call from the
+/// sprite's transform / `Sprite::highlight`, since — unlike `Model` — world sprites bake their
+/// transform into vertex positions on the CPU rather than carrying a model-matrix uniform), so
+/// the shader just passes them through.
 #[repr(C)]
 struct WorldSpriteVertex {
     pos: [f32; 3],
     uv: [f32; 2],
     color: [f32; 4],
+    normal: [f32; 3],
+    highlight: [f32; 4],
 }
 
 impl Vertex for WorldSpriteVertex {
@@ -135,7 +160,39 @@ impl Vertex for WorldSpriteVertex {
                     offset: std::mem::size_of::<f32>() as u64 * 5,
                     shader_location: 2,
                 },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: std::mem::size_of::<f32>() as u64 * 9,
+                    shader_location: 3,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: std::mem::size_of::<f32>() as u64 * 12,
+                    shader_location: 4,
+                },
             ],
+        }
+    }
+}
+
+/// Vertex format for the world-sprite outline pass: plain world-space positions, already baked
+/// on the CPU (see `DrawPass::draw_world_sprite_outline`) — no uv/color/normal needed since the
+/// outline is a flat, solid, unlit color.
+#[repr(C)]
+struct OutlineVertex {
+    pos: [f32; 3],
+}
+
+impl Vertex for OutlineVertex {
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<OutlineVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            }],
         }
     }
 }
@@ -335,7 +392,7 @@ pub fn create_world_sprite_pipeline(
     });
     let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("World Sprite Shader FS"),
-        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(SPRITE_FS_SRC)),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(WORLD_SPRITE_FS_SRC)),
     });
 
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -363,6 +420,83 @@ pub fn create_world_sprite_pipeline(
             conservative: false,
         },
         depth_stencil: Some(world_depth_state()),
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &fs_module,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    wgpu_pipeline
+}
+
+/// Pipeline for the world-sprite selection outline: a flat, enlarged, solid-color quad drawn
+/// behind the real sprite (see `DrawPass::draw_world_sprite_outline`). Unlike the model outline's
+/// "expand along normal" shell trick — which doesn't help a flat quad, since every vertex shares
+/// the same normal — the enlargement happens entirely on the CPU by widening the quad's local
+/// extents, so this pipeline only needs plain world-space positions. Reuses
+/// `model_outline_fs.wgsl`'s fixed solid-blue output.
+pub fn create_world_sprite_outline_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    camera_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("World Sprite Outline Shader VS"),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(WORLD_SPRITE_OUTLINE_VS_SRC)),
+    });
+    let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("World Sprite Outline Shader FS"),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(MODEL_OUTLINE_FS_SRC)),
+    });
+
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("World Sprite Outline Pipeline Layout"),
+        bind_group_layouts: &[None, Some(camera_layout)],
+        immediate_size: 0,
+    });
+
+    let wgpu_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("World Sprite Outline Pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &vs_module,
+            entry_point: Some("vs_main"),
+            buffers: &[Some(OutlineVertex::desc())],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(outline_depth_state()),
         multisample: wgpu::MultisampleState {
             count: 1,
             mask: !0,
@@ -436,6 +570,83 @@ pub fn create_model_pipeline(
             conservative: false,
         },
         depth_stencil: Some(world_depth_state()),
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &fs_module,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    wgpu_pipeline
+}
+
+/// Pipeline for the selection-outline pass: expands each vertex outward along its normal (see
+/// `model_outline_vs.wgsl`) and rasterizes only the expanded shell's back faces (`cull_mode:
+/// Front`), which are hidden behind the real mesh everywhere except right at the silhouette rim.
+/// No texture binding is needed, so group 0 is skipped, matching how the immediate/shape
+/// pipelines skip unused groups.
+pub fn create_model_outline_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    camera_layout: &wgpu::BindGroupLayout,
+    model_transform_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Model Outline Shader VS"),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(MODEL_OUTLINE_VS_SRC)),
+    });
+    let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Model Outline Shader FS"),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(MODEL_OUTLINE_FS_SRC)),
+    });
+
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Model Outline Pipeline Layout"),
+        bind_group_layouts: &[None, Some(camera_layout), Some(model_transform_layout)],
+        immediate_size: 0,
+    });
+
+    let wgpu_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Model Outline Pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &vs_module,
+            entry_point: Some("vs_main"),
+            buffers: &[Some(ModelVertex::desc())],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Front),
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(outline_depth_state()),
         multisample: wgpu::MultisampleState {
             count: 1,
             mask: !0,
@@ -688,17 +899,26 @@ impl DrawPass<'_> {
         x: f32, y: f32, z: f32, w: f32, h: f32,
         src_x: f32, src_y: f32, src_w: f32, src_h: f32, tex_w: f32, tex_h: f32,
         color: Color,
+        highlight: Color,
         model: glam::Mat4,
         bind_group: &wgpu::BindGroup,
     ) {
         let c = color.as_wgpu_color();
         let rgba = [c.r as f32, c.g as f32, c.b as f32, c.a as f32];
+        let hl = highlight.as_wgpu_color();
+        let highlight_rgba = [hl.r as f32, hl.g as f32, hl.b as f32, hl.a as f32];
 
         let origin = glam::Vec3::new(x, y, z);
         let corner = |lx: f32, ly: f32| {
             let p = origin + model.transform_point3(glam::Vec3::new(lx, ly, 0.0));
             [p.x, p.y, p.z]
         };
+
+        // The quad faces +Z in local space; `transform_vector3` applies only the transform's
+        // linear part (no translation), which is what a normal needs. Same value for all six
+        // vertices since the quad is flat and rigid.
+        let n = model.transform_vector3(glam::Vec3::Z).normalize_or_zero();
+        let normal = [n.x, n.y, n.z];
 
         let p0 = corner(0.0, 0.0);
         let p1 = corner(w, 0.0);
@@ -718,12 +938,12 @@ impl DrawPass<'_> {
         let uv3 = [u_right, v_top];
 
         let verts = vec![
-            WorldSpriteVertex { pos: p0, uv: uv0, color: rgba },
-            WorldSpriteVertex { pos: p1, uv: uv1, color: rgba },
-            WorldSpriteVertex { pos: p2, uv: uv2, color: rgba },
-            WorldSpriteVertex { pos: p1, uv: uv1, color: rgba },
-            WorldSpriteVertex { pos: p3, uv: uv3, color: rgba },
-            WorldSpriteVertex { pos: p2, uv: uv2, color: rgba },
+            WorldSpriteVertex { pos: p0, uv: uv0, color: rgba, normal, highlight: highlight_rgba },
+            WorldSpriteVertex { pos: p1, uv: uv1, color: rgba, normal, highlight: highlight_rgba },
+            WorldSpriteVertex { pos: p2, uv: uv2, color: rgba, normal, highlight: highlight_rgba },
+            WorldSpriteVertex { pos: p1, uv: uv1, color: rgba, normal, highlight: highlight_rgba },
+            WorldSpriteVertex { pos: p3, uv: uv3, color: rgba, normal, highlight: highlight_rgba },
+            WorldSpriteVertex { pos: p2, uv: uv2, color: rgba, normal, highlight: highlight_rgba },
         ];
 
         let data = crate::util::slice_to_bytes(&verts);
@@ -741,14 +961,55 @@ impl DrawPass<'_> {
         self.pass.draw(0..verts.len() as u32, 0..1);
     }
 
+    /// Draws a solid-blue selection outline behind a world sprite: a flat quad matching
+    /// `draw_world_sprite`'s own quad but enlarged (in the sprite's local XY plane) by a margin
+    /// proportional to its size. Coplanar with the real sprite, so it relies on draw order —
+    /// call this *before* [`DrawPass::draw_world_sprite`] for the same sprite — rather than depth
+    /// testing to stay confined to a border: the real sprite drawn afterward fully covers its own
+    /// footprint (and partially-transparent texture pixels let a thin rim of the outline show
+    /// through at the edges).
+    pub fn draw_world_sprite_outline(&mut self, x: f32, y: f32, z: f32, w: f32, h: f32, model: glam::Mat4) {
+        const OUTLINE_MARGIN_FRACTION: f32 = 0.02;
+        let margin = OUTLINE_MARGIN_FRACTION * w.max(h);
+
+        let origin = glam::Vec3::new(x, y, z);
+        let corner = |lx: f32, ly: f32| {
+            let p = origin + model.transform_point3(glam::Vec3::new(lx, ly, 0.0));
+            [p.x, p.y, p.z]
+        };
+
+        let p0 = corner(-margin, -margin);
+        let p1 = corner(w + margin, -margin);
+        let p2 = corner(-margin, h + margin);
+        let p3 = corner(w + margin, h + margin);
+
+        let verts = vec![
+            OutlineVertex { pos: p0 },
+            OutlineVertex { pos: p1 },
+            OutlineVertex { pos: p2 },
+            OutlineVertex { pos: p1 },
+            OutlineVertex { pos: p3 },
+            OutlineVertex { pos: p2 },
+        ];
+
+        let data = crate::util::slice_to_bytes(&verts);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("World Sprite Outline Vert Buffer"),
+            size: data.len() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&buffer, 0, data);
+        self.pass.set_pipeline(self.world_sprite_outline_pipeline);
+        self.pass.set_bind_group(1, self.camera_bind_group, &[]);
+        self.pass.set_vertex_buffer(0, buffer.slice(..data.len() as u64));
+        self.pass.draw(0..verts.len() as u32, 0..1);
+    }
+
     /// Draws a loaded [`Model`] in world space, transformed by the camera and the model's own
     /// transform. Each mesh is drawn with its assigned material's texture bound.
     pub fn draw_model(&mut self, model: &Model) {
-        self.queue.write_buffer(
-            &model.transform_buffer,
-            0,
-            crate::util::slice_to_bytes(&[model.transform.to_cols_array_2d()]),
-        );
+        self.write_model_uniform(model);
 
         self.pass.set_pipeline(self.model_pipeline);
         self.pass.set_bind_group(1, self.camera_bind_group, &[]);
@@ -761,5 +1022,31 @@ impl DrawPass<'_> {
             self.pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             self.pass.draw_indexed(0..mesh.num_indices, 0, 0..1);
         }
+    }
+
+    /// Draws a solid-blue selection outline around `model` (see [`create_model_outline_pipeline`]
+    /// for the technique). Intended to be called right after [`DrawPass::draw_model`] for the
+    /// same model, e.g. by editor-style tooling highlighting the selected entity.
+    pub fn draw_model_outline(&mut self, model: &Model) {
+        self.write_model_uniform(model);
+
+        self.pass.set_pipeline(self.model_outline_pipeline);
+        self.pass.set_bind_group(1, self.camera_bind_group, &[]);
+        self.pass.set_bind_group(2, &model.transform_bind_group, &[]);
+
+        for mesh in &model.meshes {
+            self.pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+            self.pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            self.pass.draw_indexed(0..mesh.num_indices, 0, 0..1);
+        }
+    }
+
+    fn write_model_uniform(&self, model: &Model) {
+        let highlight = model.highlight.as_wgpu_color();
+        let uniform = ModelUniform {
+            model: model.transform.to_cols_array_2d(),
+            highlight: [highlight.r as f32, highlight.g as f32, highlight.b as f32, highlight.a as f32],
+        };
+        self.queue.write_buffer(&model.transform_buffer, 0, crate::util::slice_to_bytes(&[uniform]));
     }
 }
