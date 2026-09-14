@@ -1,15 +1,18 @@
 mod editor_scene;
+mod egui_layer;
 mod fly_camera;
+mod menu_scene;
 mod picking;
 mod project;
+mod recent_projects;
 mod ui;
 
-use editor_scene::EditorScene;
 use libdqg::game::GameBuilder;
 use libdqg::types::Color;
+use menu_scene::MenuScene;
 
 fn main() {
-    let mut game = GameBuilder::new(Box::new(EditorScene::new()))
+    let mut game = GameBuilder::new(Box::new(MenuScene::new()))
         .title("libDQG Editor".into())
         .size(1280, 800)
         .integrated_titlebar(true)

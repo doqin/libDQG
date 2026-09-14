@@ -7,7 +7,7 @@ use libdqg::ecs::Entity;
 use libdqg::renderer::{Model, Renderer, Sprite, Texture};
 use libdqg::world::{Renderable, Transform, World};
 
-const MANIFEST_FILE: &str = "project.ron";
+pub const MANIFEST_FILE: &str = "project.ron";
 const SCENE_FILE: &str = "scenes/main.ron";
 
 /// A project on disk: a folder containing a manifest plus `assets/`, `scenes/`, `scripts/`
@@ -60,8 +60,19 @@ impl RenderableAsset {
                     Texture::from_path(renderer, &path).map_err(|e| anyhow::anyhow!(e))?,
                 );
                 let mut sprite = Sprite::new(texture);
-                sprite.width = *width;
-                sprite.height = *height;
+                if *width > 0.0 && *height > 0.0 {
+                    sprite.width = *width;
+                    sprite.height = *height;
+                } else {
+                    // No saved/explicit size (the placeholder `attach_renderable` probes with
+                    // before it knows the real one) — `Sprite::new` just sized the quad to the
+                    // texture's native *pixel* dimensions, which is normally far too big as a
+                    // *world-unit* size, so normalize it to fit a 1x1 unit square instead,
+                    // preserving the texture's aspect ratio.
+                    let longest_side = sprite.width.max(sprite.height).max(1.0);
+                    sprite.width /= longest_side;
+                    sprite.height /= longest_side;
+                }
                 Ok(Renderable::Sprite(sprite))
             }
             RenderableAsset::Model { model_path } => {
@@ -151,11 +162,14 @@ impl Project {
     }
 
     /// Lists assets of the given kind already in the project (relative to the project root),
-    /// for the Assets panel and the inspector's attach-renderable picker to share.
+    /// for the Assets panel and the inspector's attach-renderable picker to share. Filtered to
+    /// each kind's own extension(s) — `models_dir()` also holds `.mtl` files and any textures an
+    /// imported `.obj` depends on (see `import_obj_dependencies`), neither of which is itself an
+    /// attachable model.
     pub fn list_assets(&self, kind: RenderableKind) -> Vec<PathBuf> {
-        let dir = match kind {
-            RenderableKind::Sprite => self.textures_dir(),
-            RenderableKind::Model => self.models_dir(),
+        let (dir, extensions): (PathBuf, &[&str]) = match kind {
+            RenderableKind::Sprite => (self.textures_dir(), &["png", "jpg", "jpeg"]),
+            RenderableKind::Model => (self.models_dir(), &["obj"]),
         };
 
         let Ok(read_dir) = fs::read_dir(&dir) else { return Vec::new() };
@@ -163,6 +177,11 @@ impl Project {
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
             .filter(|path| path.is_file())
+            .filter(|path| {
+                path.extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| extensions.contains(&ext.to_lowercase().as_str()))
+            })
             .filter_map(|path| path.strip_prefix(&self.root).map(Path::to_path_buf).ok())
             .collect();
         paths.sort();
