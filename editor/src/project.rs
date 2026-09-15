@@ -5,14 +5,32 @@ use std::sync::Arc;
 
 use libdqg::ecs::Entity;
 use libdqg::renderer::{Model, Renderer, Sprite, Texture};
+use libdqg::scripting::ScriptAttachment;
 use libdqg::world::{Renderable, Transform, World};
 
 pub const MANIFEST_FILE: &str = "project.ron";
 const SCENE_FILE: &str = "scenes/main.ron";
 
+/// Starter content for [`Project::create_script`]'s "New Script" boilerplate — both hooks
+/// [`libdqg::scripting::ScriptRuntime`] looks for, stubbed out. `on_start`/`on_update` must stay
+/// `let`-bound closures rather than plain `fn`s (see `ScriptRuntime::start_script`'s doc comment
+/// on why) — this template exists partly so a new script starts from a working example of that,
+/// not just a blank file.
+const SCRIPT_BOILERPLATE: &str = r#"// Called once when this script starts (Play begins, or the script is attached mid-Play).
+let on_start = || {
+};
+
+// Called every frame while playing.
+// `dt` is the elapsed time in seconds since the last frame.
+// `input` lets you check keys, e.g. input.is_held("KeyW") or input.is_pressed("Space").
+let on_update = |dt, input| {
+};
+"#;
+
 /// A project on disk: a folder containing a manifest plus `assets/`, `scenes/`, `scripts/`
-/// subfolders. `scripts/` is reserved for a future scripting system — nothing reads or writes it
-/// yet.
+/// subfolders. Entities can attach one or more `.rhai` files from `scripts/` — see
+/// [`Project::list_scripts`]/[`Project::create_script`] and
+/// [`libdqg::scripting::ScriptRuntime`].
 pub struct Project {
     pub root: PathBuf,
     pub manifest: ProjectManifest,
@@ -34,6 +52,8 @@ pub struct EntityRecord {
     pub name: String,
     pub transform: Transform,
     pub renderable: Option<RenderableAsset>,
+    #[serde(default)]
+    pub scripts: Vec<ScriptAttachment>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -111,7 +131,7 @@ impl Project {
         self.assets_dir().join("models")
     }
 
-    fn scripts_dir(&self) -> PathBuf {
+    pub fn scripts_dir(&self) -> PathBuf {
         self.root.join("scripts")
     }
 
@@ -163,6 +183,7 @@ impl Project {
                 name: world.names.get(entity).map(|n| n.0.clone()).unwrap_or_default(),
                 transform: *world.transforms.get(entity).unwrap(),
                 renderable: assets.get(&entity).cloned(),
+                scripts: world.scripts.get(entity).map(|list| list.0.clone()).unwrap_or_default(),
             })
             .collect();
 
@@ -202,15 +223,55 @@ impl Project {
         paths
     }
 
-    /// Copies `src` into the project's `assets/` folder, sorted into `textures/`/`models/` by
-    /// extension (anything else falls back to a flat `assets/` folder). Importing an `.obj`
-    /// also copies its referenced `.mtl` file(s) and the textures those reference, so the model
-    /// still loads from its new location. Returns the new path, relative to the project root.
+    /// Lists `.rhai` script files already in the project (relative to the project root), for
+    /// the Assets panel and the inspector's attach-script picker to share. Same shape as
+    /// [`Project::list_assets`], just for the one script kind instead of a
+    /// [`RenderableKind`]-style enum.
+    pub fn list_scripts(&self) -> Vec<PathBuf> {
+        let Ok(read_dir) = fs::read_dir(self.scripts_dir()) else { return Vec::new() };
+        let mut paths: Vec<PathBuf> = read_dir
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("rhai")))
+            .filter_map(|path| path.strip_prefix(&self.root).map(Path::to_path_buf).ok())
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    /// Creates a new `.rhai` file in the project's `scripts/` folder, pre-filled with
+    /// `on_start`/`on_update` boilerplate (see [`SCRIPT_BOILERPLATE`]), and returns its path
+    /// relative to the project root — for the Assets panel's "New Script" button, the
+    /// create-from-scratch counterpart to [`Project::import_asset`]. Never overwrites an
+    /// existing file: tries `Script.rhai`, then `Script2.rhai`, `Script3.rhai`, ... until it
+    /// finds a name nothing is using yet.
+    pub fn create_script(&self) -> anyhow::Result<PathBuf> {
+        let dir = self.scripts_dir();
+        fs::create_dir_all(&dir)?;
+
+        let mut candidate = dir.join("Script.rhai");
+        let mut suffix = 2;
+        while candidate.exists() {
+            candidate = dir.join(format!("Script{suffix}.rhai"));
+            suffix += 1;
+        }
+
+        fs::write(&candidate, SCRIPT_BOILERPLATE)?;
+        Ok(candidate.strip_prefix(&self.root)?.to_path_buf())
+    }
+
+    /// Copies `src` into the project's `assets/` folder, sorted into `textures/`/`models/`/
+    /// `scripts/` by extension (anything else falls back to a flat `assets/` folder). Importing
+    /// an `.obj` also copies its referenced `.mtl` file(s) and the textures those reference, so
+    /// the model still loads from its new location. Returns the new path, relative to the
+    /// project root.
     pub fn import_asset(&self, src: &Path) -> anyhow::Result<PathBuf> {
         let extension = src.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
         let dest_dir = match extension.as_str() {
             "png" | "jpg" | "jpeg" => self.textures_dir(),
             "obj" | "mtl" => self.models_dir(),
+            "rhai" => self.scripts_dir(),
             _ => self.assets_dir(),
         };
         fs::create_dir_all(&dest_dir)?;

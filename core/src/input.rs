@@ -51,6 +51,16 @@ impl InputState {
     pub fn keys_held(&self) -> impl Iterator<Item = KeyCode> + '_ {
         self.keys_held.iter().copied()
     }
+
+    /// Builds an [`InputState`] with a fixed held/pressed set directly, bypassing
+    /// [`InputState::handle_event`]'s `winit::event::KeyEvent` plumbing — there's no lightweight
+    /// way to construct a real one outside of an actual window/event loop, and tests (e.g.
+    /// `core::scripting`'s input-scripting tests) just need specific keys reported as
+    /// held/pressed.
+    #[cfg(test)]
+    pub(crate) fn for_test(held: impl IntoIterator<Item = KeyCode>, pressed: impl IntoIterator<Item = KeyCode>) -> Self {
+        Self { keys_held: held.into_iter().collect(), keys_pressed: pressed.into_iter().collect() }
+    }
 }
 
 /// Per-frame mouse state: cursor position, button press/hold, and wheel motion.
