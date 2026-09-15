@@ -39,7 +39,7 @@ pub fn draw(
 ) {
     draw_menu_bar(ui, project, world, entity_assets, requests);
     draw_assets_panel(ui, project, assets_expanded, texture_previews);
-    draw_hierarchy(ui, world, selected, renaming, rename_buffer, entity_assets);
+    draw_hierarchy(ui, world, selected, renaming, rename_buffer, entity_assets, requests);
     draw_inspector(ui, world, selected, project, entity_assets, requests);
 }
 
@@ -88,6 +88,7 @@ fn draw_hierarchy(
     renaming: &mut Option<Entity>,
     rename_buffer: &mut String,
     entity_assets: &mut HashMap<Entity, RenderableAsset>,
+    requests: &mut UiRequests
 ) {
     egui::Panel::left("hierarchy_panel").show(ui, |ui| {
         ui.heading("Hierarchy");
@@ -139,6 +140,16 @@ fn draw_hierarchy(
                     *selected = Some(entity);
                     *renaming = Some(entity);
                     *rename_buffer = label.clone();
+                    ui.close();
+                }
+                if ui.button("Duplicate").clicked() {
+                    if let Some(name) = world.names.get(entity) {
+                        let new_name = format!("{} (copy)", name.0);
+                        let new_entity = world.spawn_empty(new_name, *world.transforms.get(entity).unwrap_or(&Transform::default()));
+                        if let Some(asset) = entity_assets.get(&entity) {
+                            requests.attach_renderable = Some((new_entity, asset.kind(), asset.path().to_path_buf()));
+                        }
+                    }
                     ui.close();
                 }
                 if ui.button("Delete").clicked() {

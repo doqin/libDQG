@@ -59,5 +59,27 @@
                 model_path: "assets\\models\\kakoball.obj",
             )),
         ),
+        (
+            name: "kako_ball_copy_1",
+            transform: (
+                position: (0.95, 0.0, 4.3),
+                rotation: (-0.0, -0.6087614, 0.0, 0.7933533),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            renderable: Some(Model(
+                model_path: "assets\\models\\kakoball.obj",
+            )),
+        ),
+        (
+            name: "kako_ball_copy_2",
+            transform: (
+                position: (2.0, 0.0, 4.3),
+                rotation: (-0.0, -0.6087614, 0.0, 0.7933533),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            renderable: Some(Model(
+                model_path: "assets\\models\\kakoball.obj",
+            )),
+        ),
     ],
 )

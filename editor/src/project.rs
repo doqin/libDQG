@@ -82,6 +82,20 @@ impl RenderableAsset {
             }
         }
     }
+
+    pub fn kind(&self) -> RenderableKind {
+        match self {
+            RenderableAsset::Sprite { .. } => RenderableKind::Sprite,
+            RenderableAsset::Model { .. } => RenderableKind::Model,
+        }
+    }
+
+    pub fn path(&self) -> &PathBuf {
+        match self {
+            RenderableAsset::Sprite { texture_path, .. } => texture_path,
+            RenderableAsset::Model { model_path, .. } => model_path,
+        }
+    }
 }
 
 impl Project {
