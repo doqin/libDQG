@@ -3,6 +3,7 @@ use super::entity::Entity;
 /// Sparse component storage keyed by [`Entity`]. Indexed directly by the entity's index, with
 /// the stored generation checked on every access so a stale `Entity` (held past a despawn) never
 /// reads or writes whatever new component ends up in the recycled slot.
+#[derive(Clone)]
 pub struct ComponentStore<T> {
     slots: Vec<Option<(u32, T)>>,
 }

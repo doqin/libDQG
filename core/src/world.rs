@@ -5,6 +5,7 @@ use crate::camera::Camera;
 use crate::ecs::entity::EntityAllocator;
 use crate::ecs::{ComponentStore, Entity};
 use crate::renderer::{Model, Sprite};
+use crate::scripting::ScriptList;
 use crate::transform::Transformable;
 
 /// Position/rotation/scale, kept as separate fields (rather than a raw [`Mat4`]) so an editor
@@ -79,6 +80,7 @@ pub struct World {
     pub transforms: ComponentStore<Transform>,
     pub names: ComponentStore<Name>,
     pub renderables: ComponentStore<Renderable>,
+    pub scripts: ComponentStore<ScriptList>,
     pub camera: Camera,
 }
 
@@ -89,6 +91,7 @@ impl World {
             transforms: ComponentStore::new(),
             names: ComponentStore::new(),
             renderables: ComponentStore::new(),
+            scripts: ComponentStore::new(),
             camera,
         }
     }
@@ -113,6 +116,7 @@ impl World {
         self.names.remove(entity);
         self.transforms.remove(entity);
         self.renderables.remove(entity);
+        self.scripts.remove(entity);
     }
 
     pub fn is_alive(&self, entity: Entity) -> bool {
@@ -133,5 +137,30 @@ impl World {
                 renderable.sync_transform(transform);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scripting::{ScriptAttachment, ScriptList};
+    use std::path::PathBuf;
+
+    fn test_camera() -> Camera {
+        Camera { eye: Vec3::ZERO, target: Vec3::Z, up: Vec3::Y, aspect: 1.0, fov: 45.0, znear: 0.1, zfar: 100.0 }
+    }
+
+    #[test]
+    fn despawn_clears_attached_scripts() {
+        let mut world = World::new(test_camera());
+        let entity = world.spawn_empty("Scripted", Transform::default());
+        world.scripts.insert(
+            entity,
+            ScriptList(vec![ScriptAttachment { path: PathBuf::from("scripts/move.rhai"), enabled: true }]),
+        );
+
+        world.despawn(entity);
+
+        assert!(world.scripts.get(entity).is_none());
     }
 }

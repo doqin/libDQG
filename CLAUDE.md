@@ -13,6 +13,9 @@ Workspace layout (`Cargo.toml` at the root, resolver "3"):
 - `core/` — the `libdqg` library crate (the framework itself).
 - `demo/` — a `demo` binary crate exercising the framework; treat it as the framework's own
   integration test/sample game, not a real product.
+- `editor/` — an `editor` binary crate: a visual scene editor built on `libdqg` (egui-based UI,
+  its own `Project` file format, mesh-accurate picking, and a `.rhai` scripting system). See
+  "Editor" under Architecture below.
 
 ## Common commands
 
@@ -93,6 +96,59 @@ sprites spin in place). All operations post-multiply onto the existing matrix in
 chained calls read outside-in (e.g. `rotate(...).translate(...)` translates along the *rotated*
 axis). `set_transform`/`reset_transform` bypass composition entirely when you want to drive the
 matrix directly.
+
+### ECS: World, Entity, ComponentStore
+
+- [core/src/ecs/](core/src/ecs/) — a small hand-rolled ECS, not a library like `hecs`/`bevy_ecs`.
+  `Entity` (index + generation) is allocated/recycled by `EntityAllocator`; `ComponentStore<T>` is
+  a sparse `Vec<Option<(generation, T)>>` keyed by entity index, generation-checked on every
+  access so a stale `Entity` never reads/writes a recycled slot. There's no query/archetype
+  abstraction — components are just named `ComponentStore<T>` fields on `World`.
+- [core/src/world.rs](core/src/world.rs) — `World` holds `transforms`, `names`, `renderables`, and
+  `scripts`, each its own `ComponentStore`. Adding a new component kind means adding a new named
+  field by hand (and remembering to clear it in `World::despawn`), not registering a type
+  generically. `World::sync_transforms()` copies each entity's `Transform` into its `Renderable`'s
+  GPU-facing matrix once per frame.
+
+### Editor: a scene editor built on `libdqg`
+
+- [editor/src/main.rs](editor/src/main.rs) — entry point; builds a `Game` starting at
+  `MenuScene` (New/Open/Recent project), which hands off to `EditorScene` once a project is
+  chosen. UI is all `egui` (`editor/src/egui_layer.rs` wraps the egui/wgpu/winit glue), drawn in
+  [editor/src/ui.rs](editor/src/ui.rs): menu bar, hierarchy panel, assets panel, inspector.
+- [editor/src/project.rs](editor/src/project.rs) — `Project` is a folder on disk (`project.ron`
+  manifest, `assets/{textures,models}/`, `scenes/main.ron`, `scripts/`). `EntityRecord` is the
+  serialization boundary for an entity (name/transform/renderable/scripts); assets and scripts are
+  referenced by project-root-relative path, never by an ID/handle.
+- [editor/src/picking.rs](editor/src/picking.rs) — mesh-accurate ray/triangle picking for models,
+  ray/sphere for sprites, driving hover/selection highlight in `EditorScene::render`.
+- **Scripting**: entities carry a stack of `.rhai` script attachments
+  ([core/src/scripting.rs](core/src/scripting.rs) — `ScriptList`/`ScriptAttachment`, a `World`
+  component like any other), created/renamed from the Assets panel's "Scripts" section
+  (`Project::create_script`) and attached/reordered/removed from the Inspector's "Scripts"
+  section — there is no in-editor code editor; clicking a script tile launches it in an
+  externally-chosen text editor instead (`EditorSettings::preferred_editor`, picked once and
+  remembered, `editor/src/ui.rs`'s `open_script_in_editor`). See
+  [editor/SCRIPTING.md](editor/SCRIPTING.md) for the user-facing API reference (what a `CLAUDE.md`
+  isn't the right place for). `ScriptRuntime`
+  (also in `core/src/scripting.rs`, so a future non-editor runtime can reuse it) compiles/caches
+  one Rhai `AST` per script path and runs each attachment's `on_start()`/`on_update(dt, input)`
+  against a minimal `entity` API (`x`/`y`/`z` get-set, `translate`/`rotate`/`scale(x, y, z)`,
+  `name()`) and a read-only `input` snapshot (`is_held(name)`/`is_pressed(name)`, key names
+  matching `KeyCode`'s own variant identifiers via `KeyCode::from_name`) — deliberately no
+  query/lookup API; a script only ever touches its own entity. Both `entity`'s and `input`'s Rhai
+  bindings are registered via `#[derive(CustomType)]`/`#[rhai_type(...)]` on `ScriptApi`/
+  `ScriptInput` rather than a hand-written builder chain — a plain field becomes a get/set
+  property automatically, and anything else (methods, or a `#[rhai_type(skip)]`ed field) is
+  registered once in that type's `register_extra`. Persistent per-script state relies on Rhai
+  closures (`let on_update = |dt, input| { ... };`, not a plain `fn`) capturing `Scope` variables
+  by reference — see the `scripting::closure_state_spike` test for why plain `fn`s can't do this.
+  `EditorScene`'s Play/Stop toggle (top menu bar) snapshots `World::transforms` before running
+  scripts and restores it on Stop, dropping the `ScriptRuntime` (and all script state) with it —
+  valid only because v1 scripts can't spawn/despawn entities or touch anything but their own
+  `Transform`; growing the script API past that needs a heavier restore than a transform-only
+  snapshot. A script that errors repeatedly auto-disables itself and errors surface in a small
+  overlay rather than crashing the editor.
 
 ### Other core modules
 

@@ -1,4 +1,5 @@
 mod editor_scene;
+mod editor_settings;
 mod egui_layer;
 mod fly_camera;
 mod menu_scene;

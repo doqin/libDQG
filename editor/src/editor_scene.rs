@@ -3,14 +3,16 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use libdqg::camera::Camera;
-use libdqg::ecs::Entity;
+use libdqg::ecs::{ComponentStore, Entity};
 use libdqg::glam;
 use libdqg::input::{InputState, MouseState};
 use libdqg::renderer::{DrawPass, Renderer};
 use libdqg::scene::{Scene, SceneTransition};
+use libdqg::scripting::{ScriptError, ScriptList, ScriptRuntime};
 use libdqg::types::Color;
-use libdqg::world::{Renderable, World};
+use libdqg::world::{Renderable, Transform, World};
 
+use crate::editor_settings::EditorSettings;
 use crate::egui_layer::EguiLayer;
 use crate::fly_camera::FlyCamera;
 use crate::picking;
@@ -22,6 +24,20 @@ use crate::ui;
 /// frame back to the event loop, so the loading screen keeps animating and the window stays
 /// responsive on a project with a lot of assets instead of freezing until it's all done.
 const LOAD_BUDGET_PER_FRAME: Duration = Duration::from_millis(8);
+
+/// How long a script error stays in the overlay (see [`EditorScene::script_errors`]) before it
+/// ages out on its own, so a one-off error doesn't linger forever if the user doesn't hit Stop.
+const SCRIPT_ERROR_DISPLAY: Duration = Duration::from_secs(6);
+
+/// Whether the editor is authoring the scene or running it live. Play snapshots
+/// [`World::transforms`] and starts a [`ScriptRuntime`]; Stop restores the snapshot and drops the
+/// runtime (and every script's state with it) — see [`EditorScene::start_play`]/[`stop_play`] and
+/// the implementation plan's "Play/Stop snapshot" note for why a `Transform`-only snapshot is
+/// only valid as long as v1 scripts can't touch anything but their own entity's `Transform`.
+enum EditorMode {
+    Edit,
+    Playing { transform_snapshot: ComponentStore<Transform>, runtime: ScriptRuntime },
+}
 
 /// What the editor scene should do with a project root on its first `update`, once a
 /// `Renderer` (and therefore GPU access for loading assets) is available. Set either by the
@@ -60,6 +76,19 @@ pub struct EditorScene {
     egui: EguiLayer,
     assets_expanded: bool,
     texture_previews: HashMap<PathBuf, egui::TextureHandle>,
+    mode: EditorMode,
+    /// Recent script compile/runtime errors and when each was recorded, for the overlay in
+    /// [`ui::draw_script_error_overlay`] — pruned by [`SCRIPT_ERROR_DISPLAY`] each frame and
+    /// cleared outright on Stop.
+    script_errors: Vec<(String, Instant)>,
+    /// Editor-wide preferences (currently just the external editor "Open Script" launches),
+    /// persisted next to the executable like [`RecentProjects`].
+    settings: EditorSettings,
+    /// The script currently being renamed inline in the Assets panel, if any — mirrors
+    /// `renaming`/`rename_buffer` above, just keyed by a script's project-relative path instead
+    /// of an [`Entity`] since scripts aren't ECS entities.
+    renaming_script: Option<PathBuf>,
+    script_rename_buffer: String,
 }
 
 impl EditorScene {
@@ -91,6 +120,11 @@ impl EditorScene {
             egui: EguiLayer::new(),
             assets_expanded: true,
             texture_previews: HashMap::new(),
+            mode: EditorMode::Edit,
+            script_errors: Vec::new(),
+            settings: EditorSettings::load(),
+            renaming_script: None,
+            script_rename_buffer: String::new(),
         }
     }
 
@@ -123,6 +157,10 @@ impl EditorScene {
         self.selected = None;
         self.hovered = None;
         self.texture_previews.clear();
+        // A live ScriptRuntime holds Entity handles into the *old* World; opening a different
+        // project out from under it would leave it pointing at nothing, so just stop Play first.
+        self.mode = EditorMode::Edit;
+        self.script_errors.clear();
 
         let entities: VecDeque<EntityRecord> = if create {
             VecDeque::new()
@@ -163,6 +201,9 @@ impl EditorScene {
                     Err(e) => eprintln!("Failed to load renderable: {e}"),
                 }
             }
+            if !record.scripts.is_empty() {
+                self.world.scripts.insert(entity, ScriptList(record.scripts));
+            }
         }
 
         if remaining.is_empty() {
@@ -171,6 +212,49 @@ impl EditorScene {
             self.load = Some(LoadState::LoadingAssets { project, remaining, total });
         }
     }
+
+    /// Snapshots [`World::transforms`] and starts every enabled script attachment (in order) on
+    /// every entity that has one, then switches to [`EditorMode::Playing`]. A no-op if there's no
+    /// open project (the Play button is disabled in that case anyway — see `ui::draw_menu_bar`).
+    fn start_play(&mut self) {
+        let Some(project) = self.project.as_ref() else { return };
+
+        let transform_snapshot = self.world.transforms.clone();
+        let mut runtime = ScriptRuntime::new();
+
+        for entity in self.world.iter_entities().collect::<Vec<_>>() {
+            let Some(list) = self.world.scripts.get(entity) else { continue };
+            let starts: Vec<(usize, PathBuf)> = list
+                .0
+                .iter()
+                .enumerate()
+                .filter(|(_, attachment)| attachment.enabled)
+                .map(|(index, attachment)| (index, project.root.join(&attachment.path)))
+                .collect();
+
+            for (index, script_path) in starts {
+                if let Err(e) = runtime.start_script(&self.world, entity, index, &script_path) {
+                    self.script_errors.push((format_script_error(&e), Instant::now()));
+                }
+            }
+        }
+
+        self.mode = EditorMode::Playing { transform_snapshot, runtime };
+    }
+
+    /// Restores the transforms [`start_play`](Self::start_play) snapshotted and drops the
+    /// [`ScriptRuntime`] (and with it every script's persistent state), switching back to
+    /// [`EditorMode::Edit`].
+    fn stop_play(&mut self) {
+        if let EditorMode::Playing { transform_snapshot, .. } = std::mem::replace(&mut self.mode, EditorMode::Edit) {
+            self.world.transforms = transform_snapshot;
+        }
+        self.script_errors.clear();
+    }
+}
+
+fn format_script_error(error: &ScriptError) -> String {
+    format!("{}: {}", error.script.display(), error.message)
 }
 
 impl Scene for EditorScene {
@@ -203,6 +287,10 @@ impl Scene for EditorScene {
         let mouse_delta = (mouse_pos.0 - self.last_mouse_pos.0, mouse_pos.1 - self.last_mouse_pos.1);
         self.last_mouse_pos = mouse_pos;
 
+        self.script_errors.retain(|(_, at)| at.elapsed() < SCRIPT_ERROR_DISPLAY);
+        let is_playing = matches!(self.mode, EditorMode::Playing { .. });
+        let script_error_messages: Vec<String> = self.script_errors.iter().map(|(message, _)| message.clone()).collect();
+
         let world = &mut self.world;
         let selected = &mut self.selected;
         let renaming = &mut self.renaming;
@@ -211,6 +299,9 @@ impl Scene for EditorScene {
         let entity_assets = &mut self.entity_assets;
         let assets_expanded = &mut self.assets_expanded;
         let texture_previews = &mut self.texture_previews;
+        let settings = &mut self.settings;
+        let renaming_script = &mut self.renaming_script;
+        let script_rename_buffer = &mut self.script_rename_buffer;
         let mut requests = ui::UiRequests::default();
         self.egui.run(renderer, |ui| {
             ui::draw(
@@ -223,6 +314,11 @@ impl Scene for EditorScene {
                 entity_assets,
                 assets_expanded,
                 texture_previews,
+                is_playing,
+                &script_error_messages,
+                settings,
+                renaming_script,
+                script_rename_buffer,
                 &mut requests,
             );
         });
@@ -233,6 +329,14 @@ impl Scene for EditorScene {
 
         if let Some(root) = requests.open_project.take() {
             self.queue_action(PendingAction::Open(root));
+        }
+
+        if requests.toggle_play {
+            if is_playing {
+                self.stop_play();
+            } else {
+                self.start_play();
+            }
         }
 
         if let Some((entity, kind, path)) = requests.attach_renderable.take() {
@@ -263,19 +367,34 @@ impl Scene for EditorScene {
 
         self.hover_blink_time += delta_time;
 
-        if !self.egui.wants_pointer_input() {
-            self.fly_camera.update(delta_time, input_state, mouse_state, &mut self.world.camera, mouse_delta);
+        match &mut self.mode {
+            EditorMode::Edit => {
+                if !self.egui.wants_pointer_input() {
+                    self.fly_camera.update(delta_time, input_state, mouse_state, &mut self.world.camera, mouse_delta);
 
-            let size = renderer.size();
-            let ndc_x = (mouse_pos.0 / (size.width.max(1) as f32)) * 2.0 - 1.0;
-            let ndc_y = 1.0 - (mouse_pos.1 / (size.height.max(1) as f32)) * 2.0;
-            self.hovered = picking::pick(&self.world, &self.world.camera, ndc_x, ndc_y);
+                    let size = renderer.size();
+                    let ndc_x = (mouse_pos.0 / (size.width.max(1) as f32)) * 2.0 - 1.0;
+                    let ndc_y = 1.0 - (mouse_pos.1 / (size.height.max(1) as f32)) * 2.0;
+                    self.hovered = picking::pick(&self.world, &self.world.camera, ndc_x, ndc_y);
 
-            if mouse_state.is_button_pressed(winit::event::MouseButton::Left) {
-                self.selected = self.hovered;
+                    if mouse_state.is_button_pressed(winit::event::MouseButton::Left) {
+                        self.selected = self.hovered;
+                    }
+                } else {
+                    self.hovered = None;
+                }
             }
-        } else {
-            self.hovered = None;
+            EditorMode::Playing { runtime, .. } => {
+                // Camera flying and viewport picking are edit-mode-only for v1 — playing just
+                // runs scripts against the live World; see the implementation plan's
+                // "Camera/picking fully disabled during Play" note.
+                self.hovered = None;
+                for entity in self.world.iter_entities().collect::<Vec<_>>() {
+                    for error in runtime.update_entity(&mut self.world, entity, delta_time, input_state) {
+                        self.script_errors.push((format_script_error(&error), Instant::now()));
+                    }
+                }
+            }
         }
 
         self.world.sync_transforms();

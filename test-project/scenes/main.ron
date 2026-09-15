@@ -3,30 +3,32 @@
         (
             name: "kako_cube_1",
             transform: (
-                position: (-2.3, 0.0, 0.0),
+                position: (-4.8, 0.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
             renderable: Some(Model(
                 model_path: "assets\\models\\cube.obj",
             )),
+            scripts: [],
         ),
         (
             name: "kako_cube_2",
             transform: (
-                position: (1.65, 0.0, 0.0),
+                position: (3.9, 0.0, 0.0),
                 rotation: (0.0031201467, -0.56413746, 0.21000104, 0.7985229),
                 scale: (1.0, 1.0, 1.0),
             ),
             renderable: Some(Model(
                 model_path: "assets\\models\\cube.obj",
             )),
+            scripts: [],
         ),
         (
             name: "kako_sprite",
             transform: (
-                position: (-1.2, 0.0, 0.0),
-                rotation: (0.0, 0.0, 0.0, 1.0),
+                position: (-1.2, 0.4, -5.2),
+                rotation: (0.0, 0.24615328, 0.0, 0.9692309),
                 scale: (1.0, 1.0, 1.0),
             ),
             renderable: Some(Sprite(
@@ -34,6 +36,7 @@
                 width: 1.0,
                 height: 1.0,
             )),
+            scripts: [],
         ),
         (
             name: "marx",
@@ -47,17 +50,32 @@
                 width: 1.0,
                 height: 0.5625,
             )),
+            scripts: [],
         ),
         (
-            name: "kako_ball",
+            name: "player",
             transform: (
-                position: (0.0, 0.0, 4.3),
+                position: (0.0, 0.0, 0.0),
                 rotation: (-0.0, -0.6087614, 0.0, 0.7933533),
                 scale: (1.0, 1.0, 1.0),
             ),
             renderable: Some(Model(
                 model_path: "assets\\models\\kakoball.obj",
             )),
+            scripts: [
+                (
+                    path: "scripts\\spin.rhai",
+                    enabled: true,
+                ),
+                (
+                    path: "scripts\\movement.rhai",
+                    enabled: true,
+                ),
+                (
+                    path: "scripts\\fly.rhai",
+                    enabled: true,
+                ),
+            ],
         ),
         (
             name: "kako_ball_copy_1",
@@ -69,6 +87,7 @@
             renderable: Some(Model(
                 model_path: "assets\\models\\kakoball.obj",
             )),
+            scripts: [],
         ),
         (
             name: "kako_ball_copy_2",
@@ -80,6 +99,7 @@
             renderable: Some(Model(
                 model_path: "assets\\models\\kakoball.obj",
             )),
+            scripts: [],
         ),
     ],
 )
