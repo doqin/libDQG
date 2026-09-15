@@ -57,7 +57,9 @@ the next.
 ## The `entity` object
 
 Every script has automatic access to a variable called `entity` — the entity the script is
-attached to. There's no way for a script to reach any *other* entity.
+attached to. This is the same kind of value `world.find(...)` hands back for *other* entities
+(see [The `world` object](#the-world-object) below) — there's only one entity type with one set
+of members, whether it's your own entity or one you looked up.
 
 | Member | Description |
 |---|---|
@@ -66,6 +68,13 @@ attached to. There's no way for a script to reach any *other* entity.
 | `entity.rotate(x, y, z)` | Rotates the entity by this amount, in **radians**, around each axis. This is a *delta* — it turns the entity further from wherever it currently is, it doesn't set an absolute angle. |
 | `entity.scale(x, y, z)` | Multiplies the entity's current scale by this amount. `entity.scale(2.0, 2.0, 2.0)` doubles its size; `entity.scale(1.0, 1.0, 1.0)` leaves it unchanged. |
 | `entity.name()` | Returns the entity's name (the one shown in the Hierarchy panel), as text. |
+| `entity.set_name(name)` | Renames the entity. |
+| `entity.despawn()` | Removes the entity from the scene. If a script despawns its own entity, none of that entity's other scripts run for the rest of that frame. |
+| `entity.attach_script(path)` | Attaches another script to this entity, by its project-relative path (the same form shown in the Inspector, e.g. `"scripts/Move.rhai"`) — and, unlike attaching one from the Inspector's Assets panel, it starts running immediately, the same session, not just after the next Stop/Play. |
+| `entity.set_script_enabled(index, enabled)` | Enables or disables one of the entity's attached scripts by its position in the Inspector's Scripts list (`0` is the first one). |
+| `entity.set_sprite(path)` | Attaches (or swaps to) a sprite, loading the texture at `path` (project-relative, e.g. `"assets/textures/player.png"`) — same idea as the Inspector's **Attach Sprite** picker. Replaces whatever renderable the entity already had, if any. |
+| `entity.set_model(path)` | The model counterpart to `set_sprite` — loads an `.obj` at `path` (e.g. `"assets/models/crate.obj"`). |
+| `entity.detach_renderable()` | Removes whatever sprite/model the entity currently has, if any. Does nothing (not an error) if it didn't have one. |
 
 ```rhai
 let on_update = |dt, input| {
@@ -79,6 +88,48 @@ turning a steering wheel further turns the car further, rather than snapping it 
 specific direction. If you want to face a specific direction, you'll need to work that out
 yourself from repeated `rotate` calls (there's currently no "set absolute rotation" — this may be
 added later if it turns out to be needed).
+
+A note on `set_sprite`/`set_model`: unlike the other `entity` methods, these read a file from disk
+and upload it to the GPU — the same cost as clicking **Attach Sprite**/**Attach Model** in the
+Inspector, just triggered from a script instead of a click. Call them when something actually
+changes (an `on_start`, or in response to an event), not unconditionally every frame from
+`on_update` — that would reload and re-upload the same asset 60 times a second for no reason.
+
+```rhai
+let on_start = || {
+    entity.set_sprite("assets/textures/idle.png");
+};
+```
+
+## The `world` object
+
+Every script also has automatic access to a variable called `world`, for reaching entities other
+than your own:
+
+| Member | Description |
+|---|---|
+| `world.find(name)` | Looks up an entity by its name (the one shown in the Hierarchy panel). Returns an entity value — the same kind `entity` is — if one is found, or `()` (Rhai's "nothing" value) if not. If more than one entity shares that name, you get whichever was created first. |
+| `world.spawn_entity(name, x, y, z)` | Creates a new entity at the given position and returns it, ready to use right away (`world.spawn_entity("Bullet", entity.x, entity.y, entity.z).translate(0.0, 0.0, -1.0)` works in the same line). |
+
+```rhai
+let on_update = |dt, input| {
+    let target = world.find("Player");
+    if target != () {
+        entity.x = target.x;   // follow the entity named "Player" on the x axis
+    }
+};
+```
+
+A couple of things worth knowing about `world.find(...)`:
+- It reflects that entity's position/name as of the **start of the current frame** — if another
+  script already moved or renamed that entity earlier this same frame, `find` won't see that
+  change until next frame. Your own `entity`, by contrast, is always fully up to date, including
+  changes your own script just made a moment earlier in the same call. This only matters if
+  you're chaining cross-entity logic within a single frame; for most scripts (following another
+  entity, checking its position, etc.) it's not something you'll notice.
+- Anything you *do* to an entity reached via `find` (`.translate(...)`, `.despawn()`, ...) takes
+  effect right away, same as it does for `entity` — the frame-start staleness only applies to
+  what `find` hands you, not to writes made through it.
 
 ## The `input` object
 
@@ -146,11 +197,24 @@ Scripts only run while the editor is in Play mode. When you click **Play**:
 - Every enabled script attached to every entity has its `on_start` called once (if it has one).
 - Every entity's Transform panel in the Inspector becomes read-only for the duration — a script
   moving the entity every frame would otherwise fight with you dragging the same fields.
+- Saving is disabled for the duration too — see why under Stop, below.
 
-When you click **Stop**:
-- Every entity's position, rotation, and scale snap back to whatever they were the moment you
-  clicked Play — so play-testing never permanently changes your scene.
+When you click **Stop**, the whole scene snaps back to exactly how it was the moment you clicked
+Play — not just position/rotation/scale, but names, which scripts are attached to what, what
+entities look like, and which entities exist at all:
+- Every entity's position, rotation, and scale snap back to what they were before Play.
+- Any entity a script renamed goes back to its old name; any script it attached (via
+  `entity.attach_script(...)`) or enabled/disabled (via `entity.set_script_enabled(...)`) reverts
+  too.
+- Any entity whose sprite/model a script changed (`set_sprite`/`set_model`/`detach_renderable`)
+  goes back to whatever it was showing before Play.
+- Any entity a script spawned (`world.spawn_entity(...)`) disappears; any entity a script
+  despawned (`entity.despawn()`) comes back.
 - All script state (including things like `elapsed` above) is discarded.
+
+Play-testing never permanently changes your scene — that's also why Save is disabled while
+Playing: without that, saving mid-Play would bake all of the above into the scene file instead of
+letting Stop discard it.
 
 ## Errors
 
@@ -191,15 +255,17 @@ let on_update = |dt, input| {
 
 This is an early version of scripting, kept intentionally small. Things scripts **can't** do yet:
 
-- Reach or affect any entity other than the one they're attached to.
-- Spawn or delete entities.
-- Change an entity's name, its attached model/sprite, or which scripts are attached to it.
+- Truly remove/detach a *script* from an entity (attaching and enabling/disabling are supported;
+  removal isn't yet — this is specifically about the Scripts list, not about `detach_renderable`,
+  which is fully supported).
 - Read or affect anything outside of Play mode (scripts don't run in Edit mode at all).
 
 There's also one rough edge worth knowing about rather than being surprised by: attaching a
-script (or re-enabling a disabled one) *while already in Play mode* doesn't make it start running
-— only scripts that were enabled and attached at the moment you clicked Play actually run that
-session. Click Stop and Play again to pick up the change.
+script from the Inspector's Assets panel, or re-enabling a disabled one there by hand, *while
+already in Play mode* doesn't make it start running — only scripts that were enabled and attached
+at the moment you clicked Play, plus anything attached since via `entity.attach_script(...)`,
+actually run that session. Click Stop and Play again to pick up a change made through the
+Inspector.
 
 If you need one of these, it's worth raising — the API is deliberately minimal for now, not
 permanently limited.

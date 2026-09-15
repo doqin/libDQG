@@ -1,16 +1,19 @@
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use glam::{Quat, Vec3};
-use rhai::{CustomType, Engine, FnPtr, Scope, TypeBuilder, AST};
+use rhai::{CustomType, Dynamic, Engine, FnPtr, Scope, TypeBuilder, AST};
 use serde::{Deserialize, Serialize};
 
-use crate::ecs::Entity;
+use crate::ecs::{ComponentStore, Entity};
 use crate::input::InputState;
+use crate::renderer::{Model, Renderer, Sprite, Texture};
 use crate::types::KeyCode;
-use crate::world::{Transform, World};
+use crate::world::{Name, Renderable, Transform, World};
 
 /// One script file attached to an entity. `path` is project-root-relative, the same convention
 /// [`crate::world::Renderable`]'s serialized form uses for its own asset paths.
@@ -31,27 +34,99 @@ fn default_enabled() -> bool {
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct ScriptList(pub Vec<ScriptAttachment>);
 
-/// A script's own entity, as seen from inside Rhai: `entity.x`/`.y`/`.z` (get/set),
-/// `entity.translate(x, y, z)`, `entity.rotate(x, y, z)`, `entity.scale(x, y, z)`,
-/// `entity.name()`. Deliberately minimal for v1 — no way to reach any entity but its own.
+/// Identifies which entity a [`WorldCommand`] targets: either a real, already-allocated
+/// [`Entity`], or one queued for spawn earlier in the same [`ScriptRuntime::drain_commands`]
+/// batch and not yet resolved to a real handle (see [`ScriptWorld::spawn`]/
+/// [`WorldCommand::Spawn`]).
+#[derive(Clone, Copy)]
+enum ScriptEntityId {
+    Real(Entity),
+    Pending(u64),
+}
+
+/// An intent queued by an [`EntityHandle`]/[`ScriptWorld`] method, applied by
+/// [`ScriptRuntime::drain_commands`] immediately after the `on_start`/`on_update` call that
+/// queued it returns. Nothing reachable from inside a Rhai call can hold a live `&mut World` —
+/// `rhai`'s custom types must be `Clone + 'static`, which a borrow isn't — so this queue (a
+/// cheap `Rc<RefCell<...>>` handle) is how scripts affect `World` anyway: they record an intent
+/// here instead of mutating directly, and the host (which *does* have `&mut World` right around
+/// each script call) applies it afterward. Applying strictly in emission order means later
+/// commands targeting an entity a prior command in the same batch already despawned simply
+/// resolve to nothing and no-op, rather than needing special-case handling.
+enum WorldCommand {
+    SetTransform(ScriptEntityId, Transform),
+    Rename(ScriptEntityId, String),
+    Despawn(ScriptEntityId),
+    Spawn { pending_id: u64, name: String, transform: Transform },
+    AttachScript(ScriptEntityId, PathBuf),
+    SetScriptEnabled(ScriptEntityId, usize, bool),
+    /// Loads a texture at `path` (project-relative) and attaches it as a [`Renderable::Sprite`],
+    /// replacing whatever renderable (if any) the entity already had — "attach" and "swap" are
+    /// the same command, just depending on whether there was one before. Unlike every other
+    /// [`WorldCommand`], applying this needs a live [`Renderer`], so it's only handled when
+    /// [`ScriptRuntime::drain_commands`] is given one (see that method's doc comment).
+    SetSprite(ScriptEntityId, PathBuf),
+    /// The [`Renderable::Model`] counterpart to [`WorldCommand::SetSprite`] — same path
+    /// resolution, same renderer requirement.
+    SetModel(ScriptEntityId, PathBuf),
+    /// Removes whatever renderable the entity has, if any. Unlike `SetSprite`/`SetModel`, this
+    /// needs no [`Renderer`] — there's nothing to load.
+    ClearRenderable(ScriptEntityId),
+}
+
+/// A read-only copy of every entity's name and [`Transform`], captured once per frame by
+/// [`ScriptRuntime::begin_frame`] before any script runs that frame. `world.find(name)` reads
+/// only this, never the live `World` — for the same reason writes go through [`WorldCommand`]
+/// instead of a live reference. This means a cross-entity read reflects that entity's state as
+/// of the *start* of the frame, even if another script already moved it earlier the same frame —
+/// deterministic and simple to reason about, at the cost of at-most-one-frame staleness for
+/// reads of entities other than self. Self (`entity`) isn't affected by this: it's resynced from
+/// the live `World` before every call, same as always (see [`ScriptRuntime::update_entity`]).
+#[derive(Default)]
+struct FrameSnapshot {
+    transforms: ComponentStore<Transform>,
+    names: ComponentStore<Name>,
+    /// First entity (by spawn order) wins if two entities share a name.
+    by_name: HashMap<String, Entity>,
+}
+
+impl FrameSnapshot {
+    fn capture(world: &World) -> Self {
+        let mut by_name = HashMap::new();
+        for (entity, name) in world.names.iter() {
+            by_name.entry(name.0.clone()).or_insert(entity);
+        }
+        Self { transforms: world.transforms.clone(), names: world.names.clone(), by_name }
+    }
+}
+
+/// A handle to one entity, seen from inside Rhai — either a script's own `entity`, or another
+/// entity reached via `world.find(name)`. Both are this same type with the same methods, so
+/// there's exactly one entity-manipulation surface rather than two parallel ones.
+///
+/// Every mutating method (`translate`/`rotate`/`scale`/the `x`/`y`/`z` setters/`set_name`/
+/// `despawn`/`attach_script`/`set_script_enabled`) does two things: updates this handle's own
+/// cached fields (so a script reading `entity.x` right after setting it still sees its own
+/// write, matching how it felt before cross-entity access existed) and pushes a matching
+/// [`WorldCommand`] onto `commands` — see that type's doc comment for why nothing here can just
+/// mutate `World` directly.
 ///
 /// Registered on the [`Engine`] via `#[derive(CustomType)]` (`ScriptRuntime::build_engine`'s
-/// `engine.build_type::<ScriptApi>()`) instead of a hand-written builder chain:
-/// - A plain field with no `#[rhai_type(...)]` attribute (`x`/`y`/`z`) is automatically exposed
-///   as a get/set property under its own field name — that's the common case, so extending the
-///   API with another simple scriptable number/string is just "add a field."
-/// - `#[rhai_type(skip)]` opts a field out of that auto-registration entirely — used here for
-///   `rotation`/`scale`/`name`, which are script-visible only through the methods in
-///   [`ScriptApi::register_extra`], not as raw gettable/settable fields.
+/// `engine.build_type::<EntityHandle>()`) instead of a hand-written builder chain:
+/// - `#[rhai_type(skip)]` opts every field out of the derive's automatic get/set-property
+///   registration — `x`/`y`/`z` need custom setters now (to also queue a command), so unlike the
+///   original single-entity-only version of this type, nothing here can just be a plain
+///   auto-exposed field anymore.
 /// - `register_extra` (wired up via `#[rhai_type(extra = Self::register_extra)]` below) is where
-///   anything that isn't a 1:1 field property — methods, or a skipped field that still needs
-///   custom get/set logic — gets registered, in one place instead of scattered through
-///   `build_engine`.
+///   all of that — properties and methods alike — gets registered, in one place.
 #[derive(Clone, CustomType)]
 #[rhai_type(name = "Entity", extra = Self::register_extra)]
-struct ScriptApi {
+struct EntityHandle {
+    #[rhai_type(skip)]
     x: f64,
+    #[rhai_type(skip)]
     y: f64,
+    #[rhai_type(skip)]
     z: f64,
     /// Kept as a [`Quat`], synced in/out of [`Transform::rotation`] as a plain copy — never
     /// decomposed to/from Euler angles on every frame. An Euler round-trip through
@@ -67,53 +142,153 @@ struct ScriptApi {
     scale: Vec3,
     #[rhai_type(skip)]
     name: String,
+    #[rhai_type(skip)]
+    id: ScriptEntityId,
+    #[rhai_type(skip)]
+    commands: Rc<RefCell<Vec<WorldCommand>>>,
 }
 
-impl ScriptApi {
-    /// Everything the field-level `#[rhai_type]` attributes on [`ScriptApi`] can't express as a
-    /// plain property: the `translate`/`rotate`/`scale`/`name` methods.
+impl EntityHandle {
+    /// Everything the field-level `#[rhai_type]` attributes on [`EntityHandle`] can't express as
+    /// a plain property: the `x`/`y`/`z` get/set pair (custom, not auto, since the setters must
+    /// also queue a [`WorldCommand::SetTransform`]) and the `translate`/`rotate`/`scale`/
+    /// `name`/`set_name`/`despawn`/`attach_script`/`set_script_enabled`/`set_sprite`/
+    /// `set_model`/`detach_renderable` methods.
     fn register_extra(builder: &mut TypeBuilder<Self>) {
         builder
+            .with_get_set("x", |e: &mut Self| e.x, |e: &mut Self, v: f64| {
+                e.x = v;
+                e.queue_transform_update();
+            })
+            .with_get_set("y", |e: &mut Self| e.y, |e: &mut Self, v: f64| {
+                e.y = v;
+                e.queue_transform_update();
+            })
+            .with_get_set("z", |e: &mut Self| e.z, |e: &mut Self, v: f64| {
+                e.z = v;
+                e.queue_transform_update();
+            })
             .with_fn("translate", |e: &mut Self, x: f64, y: f64, z: f64| {
                 e.x += x;
                 e.y += y;
                 e.z += z;
+                e.queue_transform_update();
             })
             .with_fn("rotate", |e: &mut Self, x: f64, y: f64, z: f64| {
                 let delta = Quat::from_euler(glam::EulerRot::XYZ, x as f32, y as f32, z as f32);
                 e.rotation = (e.rotation * delta).normalize();
+                e.queue_transform_update();
             })
             .with_fn("scale", |e: &mut Self, x: f64, y: f64, z: f64| {
                 e.scale *= Vec3::new(x as f32, y as f32, z as f32);
+                e.queue_transform_update();
             })
-            .with_fn("name", |e: &mut Self| e.name.clone());
+            .with_fn("name", |e: &mut Self| e.name.clone())
+            .with_fn("set_name", |e: &mut Self, name: &str| {
+                e.name = name.to_string();
+                e.commands.borrow_mut().push(WorldCommand::Rename(e.id, e.name.clone()));
+            })
+            .with_fn("despawn", |e: &mut Self| {
+                e.commands.borrow_mut().push(WorldCommand::Despawn(e.id));
+            })
+            .with_fn("attach_script", |e: &mut Self, path: &str| {
+                e.commands.borrow_mut().push(WorldCommand::AttachScript(e.id, PathBuf::from(path)));
+            })
+            .with_fn("set_script_enabled", |e: &mut Self, index: i64, enabled: bool| {
+                e.commands.borrow_mut().push(WorldCommand::SetScriptEnabled(e.id, index.max(0) as usize, enabled));
+            })
+            .with_fn("set_sprite", |e: &mut Self, path: &str| {
+                e.commands.borrow_mut().push(WorldCommand::SetSprite(e.id, PathBuf::from(path)));
+            })
+            .with_fn("set_model", |e: &mut Self, path: &str| {
+                e.commands.borrow_mut().push(WorldCommand::SetModel(e.id, PathBuf::from(path)));
+            })
+            .with_fn("detach_renderable", |e: &mut Self| {
+                e.commands.borrow_mut().push(WorldCommand::ClearRenderable(e.id));
+            });
     }
 
-    /// Seeds a fresh instance from an entity's current name/[`Transform`] — used once by
-    /// [`ScriptRuntime::start_script`].
-    fn from_transform(transform: &Transform, name: String) -> Self {
-        let mut api = Self { x: 0.0, y: 0.0, z: 0.0, rotation: Quat::IDENTITY, scale: Vec3::ONE, name };
-        api.sync_from_transform(transform);
-        api
+    /// Builds a handle for `id`, seeded from `transform`/`name` — used both for a script's own
+    /// `entity` (seeded from the live `World`) and for a handle `world.find(...)` hands back
+    /// (seeded from the frozen [`FrameSnapshot`]).
+    fn new(id: ScriptEntityId, transform: &Transform, name: String, commands: Rc<RefCell<Vec<WorldCommand>>>) -> Self {
+        Self {
+            x: transform.position.x as f64,
+            y: transform.position.y as f64,
+            z: transform.position.z as f64,
+            rotation: transform.rotation,
+            scale: transform.scale,
+            name,
+            id,
+            commands,
+        }
     }
 
-    /// Overwrites position/rotation/scale from `transform`, leaving `name` untouched — the one
-    /// place [`ScriptRuntime::update_entity`] needs to sync the *whole* transform in before
-    /// calling `on_update`, rather than three separate per-field copies.
-    fn sync_from_transform(&mut self, transform: &Transform) {
+    /// Overwrites position/rotation/scale/name from the live `World` — the one place
+    /// [`ScriptRuntime::update_entity`] needs to sync a script's own entity in before calling
+    /// `on_update`, rather than four separate per-field copies. Only ever used for self: a
+    /// handle from `world.find(...)` is seeded once from the frame's frozen snapshot and never
+    /// resynced (see the [`FrameSnapshot`] doc comment for why that's deliberate).
+    fn sync_from_world(&mut self, transform: &Transform, name: &str) {
         self.x = transform.position.x as f64;
         self.y = transform.position.y as f64;
         self.z = transform.position.z as f64;
         self.rotation = transform.rotation;
         self.scale = transform.scale;
+        self.name = name.to_string();
     }
 
-    /// The inverse of [`ScriptApi::sync_from_transform`] — writes position/rotation/scale back
-    /// out after `on_update` runs.
-    fn write_into(&self, transform: &mut Transform) {
-        transform.position = Vec3::new(self.x as f32, self.y as f32, self.z as f32);
-        transform.rotation = self.rotation;
-        transform.scale = self.scale;
+    fn queue_transform_update(&self) {
+        let transform = Transform {
+            position: Vec3::new(self.x as f32, self.y as f32, self.z as f32),
+            rotation: self.rotation,
+            scale: self.scale,
+        };
+        self.commands.borrow_mut().push(WorldCommand::SetTransform(self.id, transform));
+    }
+}
+
+/// The `world` object scripts use to reach entities other than their own:
+/// `world.find(name)` (an [`EntityHandle`], or `()` if no entity has that name — Rhai has no
+/// `Option` visible to scripts, so unit is the idiomatic "not found", the same way
+/// [`ScriptInput`]'s `is_held`/`is_pressed` treat an unrecognized key name as simply false rather
+/// than an error) and `world.spawn_entity(name, x, y, z)` (`spawn` alone is a reserved word in
+/// Rhai, even as a method name — queues a new entity, see
+/// [`WorldCommand::Spawn`] — and returns a handle to it usable immediately, since
+/// [`ScriptRuntime::drain_commands`] resolves same-batch pending spawns before anything later in
+/// the batch that references them).
+///
+/// Reads (`find`) come from the frozen [`FrameSnapshot`]; writes (`spawn`, and anything called on
+/// a handle it returns) go through the same [`WorldCommand`] queue as `entity` does — see both of
+/// those types' doc comments for why.
+#[derive(Clone, CustomType)]
+#[rhai_type(name = "World", extra = Self::register_extra)]
+struct ScriptWorld {
+    #[rhai_type(skip)]
+    frame: Rc<RefCell<FrameSnapshot>>,
+    #[rhai_type(skip)]
+    commands: Rc<RefCell<Vec<WorldCommand>>>,
+    #[rhai_type(skip)]
+    next_pending_id: Rc<Cell<u64>>,
+}
+
+impl ScriptWorld {
+    fn register_extra(builder: &mut TypeBuilder<Self>) {
+        builder
+            .with_fn("find", |w: &mut Self, name: &str| -> Dynamic {
+                let frame = w.frame.borrow();
+                let Some(&entity) = frame.by_name.get(name) else { return Dynamic::UNIT };
+                let transform = frame.transforms.get(entity).copied().unwrap_or_default();
+                let entity_name = frame.names.get(entity).map(|n| n.0.clone()).unwrap_or_default();
+                Dynamic::from(EntityHandle::new(ScriptEntityId::Real(entity), &transform, entity_name, w.commands.clone()))
+            })
+            .with_fn("spawn_entity", |w: &mut Self, name: &str, x: f64, y: f64, z: f64| -> EntityHandle {
+                let pending_id = w.next_pending_id.get();
+                w.next_pending_id.set(pending_id + 1);
+                let transform = Transform { position: Vec3::new(x as f32, y as f32, z as f32), ..Transform::default() };
+                w.commands.borrow_mut().push(WorldCommand::Spawn { pending_id, name: name.to_string(), transform });
+                EntityHandle::new(ScriptEntityId::Pending(pending_id), &transform, name.to_string(), w.commands.clone())
+            });
     }
 }
 
@@ -125,8 +300,8 @@ impl ScriptApi {
 /// typo in a key name fails quietly instead of aborting the script.
 ///
 /// Rebuilt fresh from [`InputState`] every [`ScriptRuntime::update_entity`] call rather than
-/// synced in/out like [`ScriptApi`] — input is read-only from a script's perspective, so there's
-/// nothing to write back.
+/// synced in/out like [`EntityHandle`] — input is read-only from a script's perspective, so
+/// there's nothing to write back.
 #[derive(Clone, CustomType)]
 #[rhai_type(name = "Input", extra = Self::register_extra)]
 struct ScriptInput {
@@ -186,18 +361,49 @@ pub struct ScriptRuntime {
     engine: Engine,
     compiled: HashMap<PathBuf, Rc<AST>>,
     instances: HashMap<(Entity, usize), ScriptInstance>,
+    /// Shared with every script instance's `entity`/`world` values — see [`WorldCommand`].
+    commands: Rc<RefCell<Vec<WorldCommand>>>,
+    /// Shared with every script instance's `world` value — see [`FrameSnapshot`].
+    frame: Rc<RefCell<FrameSnapshot>>,
+    /// Shared with every script instance's `world` value, so two scripts spawning in the same
+    /// frame can't mint colliding [`ScriptEntityId::Pending`] ids.
+    next_pending_id: Rc<Cell<u64>>,
+    /// Needed to resolve `attach_script`'s project-relative path into a real file path — see
+    /// [`WorldCommand::AttachScript`]. `start_script`'s own `script_path` argument, by contrast,
+    /// always arrives already resolved (the editor does that itself before calling it).
+    project_root: PathBuf,
 }
 
 impl ScriptRuntime {
-    pub fn new() -> Self {
-        Self { engine: Self::build_engine(), compiled: HashMap::new(), instances: HashMap::new() }
+    pub fn new(project_root: PathBuf) -> Self {
+        Self {
+            engine: Self::build_engine(),
+            compiled: HashMap::new(),
+            instances: HashMap::new(),
+            commands: Rc::new(RefCell::new(Vec::new())),
+            frame: Rc::new(RefCell::new(FrameSnapshot::default())),
+            next_pending_id: Rc::new(Cell::new(0)),
+            project_root,
+        }
     }
 
     fn build_engine() -> Engine {
         let mut engine = Engine::new();
-        engine.build_type::<ScriptApi>();
+        engine.build_type::<EntityHandle>();
         engine.build_type::<ScriptInput>();
+        engine.build_type::<ScriptWorld>();
         engine
+    }
+
+    /// Refreshes the [`FrameSnapshot`] every `world.find(...)` call this frame will read from.
+    /// Call once per frame, before running any script that frame (see the editor's
+    /// `EditorScene::update`, `EditorMode::Playing` branch).
+    pub fn begin_frame(&mut self, world: &World) {
+        *self.frame.borrow_mut() = FrameSnapshot::capture(world);
+    }
+
+    fn script_world(&self) -> ScriptWorld {
+        ScriptWorld { frame: self.frame.clone(), commands: self.commands.clone(), next_pending_id: self.next_pending_id.clone() }
     }
 
     /// Compiles (or reuses the cached [`AST`] for) the script at `script_path`, then starts a
@@ -209,6 +415,12 @@ impl ScriptRuntime {
     /// A compile/read/body error is fatal — no instance is created and `Err` is returned. An
     /// `on_start` error is not: the instance is still created (so `on_update` still runs on
     /// later frames) and the error is only reported, not propagated as a failure to start.
+    ///
+    /// Anything `on_start` queues via `entity`/`world` (a despawn, a spawn, ...) is *not* applied
+    /// here — it sits in the shared command queue until the next [`Self::drain_commands`] call
+    /// (the first `update_entity` of the next frame), one frame later than an `on_update`-queued
+    /// command would be. This only matters for `on_start`-time cross-entity effects, which are
+    /// rare enough not to be worth a `&mut World` here just to close that one-frame gap.
     pub fn start_script(&mut self, world: &World, entity: Entity, index: usize, script_path: &Path) -> Result<(), ScriptError> {
         let err = |message: String| ScriptError { entity, script: script_path.to_path_buf(), message };
 
@@ -225,7 +437,8 @@ impl ScriptRuntime {
         let mut scope = Scope::new();
         let transform = world.transforms.get(entity).copied().unwrap_or_default();
         let name = world.names.get(entity).map(|n| n.0.clone()).unwrap_or_default();
-        scope.push("entity", ScriptApi::from_transform(&transform, name));
+        scope.push("entity", EntityHandle::new(ScriptEntityId::Real(entity), &transform, name, self.commands.clone()));
+        scope.push("world", self.script_world());
 
         self.engine.run_ast_with_scope(&mut scope, &ast).map_err(|e| err(format!("script error: {e}")))?;
 
@@ -247,9 +460,24 @@ impl ScriptRuntime {
     /// Calls every started, enabled attachment's `on_update(dt, input)` closure for `entity`, in
     /// attachment order (disabled attachments — including ones this call itself just disabled
     /// after too many failures — are skipped), syncing the entity's [`crate::world::Transform`]
-    /// in beforehand and writing the result back out after. One instance erroring doesn't stop
-    /// the others; every error encountered is returned rather than the first one short-circuiting.
-    pub fn update_entity(&mut self, world: &mut World, entity: Entity, dt: f32, input: &InputState) -> Vec<ScriptError> {
+    /// and name in beforehand and applying whatever it queued via `entity`/`world` (see
+    /// [`Self::drain_commands`]) right after. One instance erroring doesn't stop the others;
+    /// every error encountered is returned rather than the first one short-circuiting. If an
+    /// attachment despawns its own entity, the remaining attachments on that entity are skipped
+    /// for the rest of this call — there's nothing left to update.
+    ///
+    /// `renderer` is only needed for `entity.set_sprite(...)`/`set_model(...)` (loading a new
+    /// asset needs a live GPU device); pass `None` when one isn't available (e.g. in a test with
+    /// no real `Renderer`) and any such command just reports a [`ScriptError`] instead of
+    /// silently doing nothing or panicking.
+    pub fn update_entity(
+        &mut self,
+        world: &mut World,
+        entity: Entity,
+        dt: f32,
+        input: &InputState,
+        renderer: Option<&Renderer>,
+    ) -> Vec<ScriptError> {
         let mut errors = Vec::new();
         let Some(attachments) = world.scripts.get(entity).cloned() else { return errors };
         let input = ScriptInput::from_state(input);
@@ -261,23 +489,18 @@ impl ScriptRuntime {
             let Some(instance) = self.instances.get_mut(&(entity, index)) else { continue };
             let Some(on_update) = instance.on_update.clone() else { continue };
 
-            // Sync the entity's transform into the script's API in one shot.
+            // Sync the entity's transform/name into the script's own `entity` handle in one shot.
             if let Some(transform) = world.transforms.get(entity).copied() {
-                if let Some(mut api) = scope_entity_mut(&mut instance.scope) {
-                    api.sync_from_transform(&transform);
+                let name = world.names.get(entity).map(|n| n.0.as_str()).unwrap_or("");
+                if let Some(mut handle) = scope_entity_mut(&mut instance.scope) {
+                    handle.sync_from_world(&transform, name);
                 }
             }
 
-            // Call the script's `on_update(dt, input)` closure, which may mutate its captured `Scope` variables
+            // Call the script's `on_update(dt, input)` closure, which may mutate its captured
+            // `Scope` variables and/or queue `WorldCommand`s via `entity`/`world`.
             match on_update.call::<rhai::Dynamic>(&self.engine, &instance.ast, (dt as f64, input.clone())) {
-                Ok(_) => {
-                    instance.consecutive_failures = 0;
-                    if let Some(api) = scope_entity_mut(&mut instance.scope) {
-                        if let Some(transform) = world.transforms.get_mut(entity) {
-                            api.write_into(transform);
-                        }
-                    }
-                }
+                Ok(_) => instance.consecutive_failures = 0,
                 Err(e) => {
                     instance.consecutive_failures += 1;
                     errors.push(ScriptError { entity, script: attachment.path.clone(), message: e.to_string() });
@@ -292,23 +515,155 @@ impl ScriptRuntime {
                     }
                 }
             }
+
+            // Apply whatever this call queued — commands emitted before a thrown error are still
+            // valid intents and still apply, since Rhai only halts the *script*, not the queue.
+            errors.extend(self.drain_commands(world, renderer, &attachment.path));
+
+            if !world.is_alive(entity) {
+                break;
+            }
+        }
+
+        errors
+    }
+
+    /// Applies every [`WorldCommand`] queued since the last drain, in emission order, resolving
+    /// any [`ScriptEntityId::Pending`] against `Spawn` commands earlier in this same batch. This
+    /// is the only place `World` is actually mutated on a script's behalf — nothing reachable
+    /// from inside the Rhai call itself can hold `world` (see [`WorldCommand`]'s doc comment).
+    /// `renderer` is threaded through for `SetSprite`/`SetModel` (see [`Self::update_entity`]'s
+    /// doc comment); `source_script` attributes any error that isn't more specifically
+    /// attributable (e.g. an `AttachScript` failure already carries its own script path).
+    fn drain_commands(&mut self, world: &mut World, renderer: Option<&Renderer>, source_script: &Path) -> Vec<ScriptError> {
+        let commands: Vec<WorldCommand> = self.commands.borrow_mut().drain(..).collect();
+        let mut pending: HashMap<u64, Entity> = HashMap::new();
+        let mut errors = Vec::new();
+
+        let resolve = |id: ScriptEntityId, pending: &HashMap<u64, Entity>| match id {
+            ScriptEntityId::Real(entity) => Some(entity),
+            ScriptEntityId::Pending(pending_id) => pending.get(&pending_id).copied(),
+        };
+
+        for command in commands {
+            match command {
+                WorldCommand::Spawn { pending_id, name, transform } => {
+                    let entity = world.spawn_empty(name, transform);
+                    pending.insert(pending_id, entity);
+                }
+                WorldCommand::SetTransform(id, transform) => {
+                    if let Some(entity) = resolve(id, &pending) {
+                        if let Some(slot) = world.transforms.get_mut(entity) {
+                            *slot = transform;
+                        }
+                    }
+                }
+                WorldCommand::Rename(id, name) => {
+                    if let Some(entity) = resolve(id, &pending) {
+                        if let Some(slot) = world.names.get_mut(entity) {
+                            slot.0 = name;
+                        }
+                    }
+                }
+                WorldCommand::Despawn(id) => {
+                    if let Some(entity) = resolve(id, &pending) {
+                        world.despawn(entity);
+                        self.instances.retain(|(e, _), _| *e != entity);
+                    }
+                }
+                WorldCommand::AttachScript(id, path) => {
+                    if let Some(entity) = resolve(id, &pending) {
+                        let full_path = self.project_root.join(&path);
+                        let new_index = match world.scripts.get_mut(entity) {
+                            Some(list) => {
+                                list.0.push(ScriptAttachment { path, enabled: true });
+                                list.0.len() - 1
+                            }
+                            None => {
+                                world.scripts.insert(entity, ScriptList(vec![ScriptAttachment { path, enabled: true }]));
+                                0
+                            }
+                        };
+                        // Start it right away so it actually runs this same Play session,
+                        // instead of sitting inert until the next Stop/Play like an attachment
+                        // made through the Inspector UI does today.
+                        if let Err(e) = self.start_script(world, entity, new_index, &full_path) {
+                            errors.push(e);
+                        }
+                    }
+                }
+                WorldCommand::SetScriptEnabled(id, index, enabled) => {
+                    if let Some(entity) = resolve(id, &pending) {
+                        if let Some(list) = world.scripts.get_mut(entity) {
+                            if let Some(attachment) = list.0.get_mut(index) {
+                                attachment.enabled = enabled;
+                            }
+                        }
+                    }
+                }
+                WorldCommand::SetSprite(id, path) => {
+                    if let Some(entity) = resolve(id, &pending) {
+                        let Some(renderer) = renderer else {
+                            errors.push(no_renderer_error(entity, source_script, &path));
+                            continue;
+                        };
+                        let full_path = self.project_root.join(&path);
+                        match Texture::from_path(renderer, &full_path) {
+                            Ok(texture) => {
+                                let mut sprite = Sprite::new(Arc::new(texture));
+                                sprite.fit_within_unit_square();
+                                world.set_renderable(entity, Renderable::Sprite(sprite));
+                            }
+                            Err(e) => errors.push(ScriptError {
+                                entity,
+                                script: source_script.to_path_buf(),
+                                message: format!("failed to load sprite {}: {e}", path.display()),
+                            }),
+                        }
+                    }
+                }
+                WorldCommand::SetModel(id, path) => {
+                    if let Some(entity) = resolve(id, &pending) {
+                        let Some(renderer) = renderer else {
+                            errors.push(no_renderer_error(entity, source_script, &path));
+                            continue;
+                        };
+                        let full_path = self.project_root.join(&path);
+                        match Model::load(renderer, &full_path) {
+                            Ok(model) => world.set_renderable(entity, Renderable::Model(model)),
+                            Err(e) => errors.push(ScriptError {
+                                entity,
+                                script: source_script.to_path_buf(),
+                                message: format!("failed to load model {}: {e}", path.display()),
+                            }),
+                        }
+                    }
+                }
+                WorldCommand::ClearRenderable(id) => {
+                    if let Some(entity) = resolve(id, &pending) {
+                        world.clear_renderable(entity);
+                    }
+                }
+            }
         }
 
         errors
     }
 }
 
-impl Default for ScriptRuntime {
-    fn default() -> Self {
-        Self::new()
+fn no_renderer_error(entity: Entity, source_script: &Path, asset_path: &Path) -> ScriptError {
+    ScriptError {
+        entity,
+        script: source_script.to_path_buf(),
+        message: format!("cannot load {} — no renderer available", asset_path.display()),
     }
 }
 
-/// Borrows the `entity` variable out of a script instance's `Scope` as `&mut ScriptApi`, working
-/// whether or not it's been promoted to a shared value by closure capture (see
+/// Borrows the `entity` variable out of a script instance's `Scope` as `&mut EntityHandle`,
+/// working whether or not it's been promoted to a shared value by closure capture (see
 /// `scripting::closure_state_spike`).
-fn scope_entity_mut<'a>(scope: &'a mut Scope<'static>) -> Option<rhai::DynamicWriteLock<'a, ScriptApi>> {
-    scope.get_mut("entity")?.write_lock::<ScriptApi>()
+fn scope_entity_mut<'a>(scope: &'a mut Scope<'static>) -> Option<rhai::DynamicWriteLock<'a, EntityHandle>> {
+    scope.get_mut("entity")?.write_lock::<EntityHandle>()
 }
 
 #[cfg(test)]
@@ -379,6 +734,10 @@ mod runtime_tests {
         InputState::for_test([], [])
     }
 
+    fn test_runtime() -> ScriptRuntime {
+        ScriptRuntime::new(PathBuf::new())
+    }
+
     /// Writes a `.rhai` source string to a fresh temp file and returns its path, so
     /// [`ScriptRuntime::start_script`] (which reads scripts from disk, like the real editor
     /// will) has something real to compile.
@@ -405,12 +764,12 @@ mod runtime_tests {
         );
         world.scripts.insert(entity, ScriptList(vec![ScriptAttachment { path: script_path.clone(), enabled: true }]));
 
-        let mut runtime = ScriptRuntime::new();
+        let mut runtime = test_runtime();
         runtime.start_script(&world, entity, 0, &script_path).expect("script should start");
 
         let input = no_input();
-        assert!(runtime.update_entity(&mut world, entity, 0.5, &input).is_empty());
-        assert!(runtime.update_entity(&mut world, entity, 0.5, &input).is_empty());
+        assert!(runtime.update_entity(&mut world, entity, 0.5, &input, None).is_empty());
+        assert!(runtime.update_entity(&mut world, entity, 0.5, &input, None).is_empty());
 
         let position = world.transforms.get(entity).unwrap().position;
         assert!((position.x - 1.0).abs() < 1e-5, "expected x\u{2248}1.0 after two 0.5s updates, got {position:?}");
@@ -423,12 +782,12 @@ mod runtime_tests {
         let script_path = write_script("broken.rhai", "let on_update = |dt, input| { throw \"boom\"; };");
         world.scripts.insert(entity, ScriptList(vec![ScriptAttachment { path: script_path.clone(), enabled: true }]));
 
-        let mut runtime = ScriptRuntime::new();
+        let mut runtime = test_runtime();
         runtime.start_script(&world, entity, 0, &script_path).expect("script should start");
 
         let input = no_input();
         for _ in 0..MAX_CONSECUTIVE_FAILURES {
-            let errors = runtime.update_entity(&mut world, entity, 0.1, &input);
+            let errors = runtime.update_entity(&mut world, entity, 0.1, &input, None);
             assert_eq!(errors.len(), 1);
         }
 
@@ -436,7 +795,7 @@ mod runtime_tests {
         assert!(!attachment_enabled, "attachment should auto-disable after MAX_CONSECUTIVE_FAILURES errors");
 
         // Disabled, so no further errors should be produced even though the script still throws.
-        assert!(runtime.update_entity(&mut world, entity, 0.1, &input).is_empty());
+        assert!(runtime.update_entity(&mut world, entity, 0.1, &input, None).is_empty());
     }
 
     #[test]
@@ -462,11 +821,11 @@ mod runtime_tests {
         );
         world.scripts.insert(entity, ScriptList(vec![ScriptAttachment { path: script_path.clone(), enabled: true }]));
 
-        let mut runtime = ScriptRuntime::new();
+        let mut runtime = test_runtime();
         runtime.start_script(&world, entity, 0, &script_path).expect("script should start");
 
         let input = InputState::for_test([KeyCode::KeyW], [KeyCode::Space]);
-        assert!(runtime.update_entity(&mut world, entity, 1.0, &input).is_empty());
+        assert!(runtime.update_entity(&mut world, entity, 1.0, &input, None).is_empty());
 
         let position = world.transforms.get(entity).unwrap().position;
         assert!(
@@ -476,12 +835,12 @@ mod runtime_tests {
     }
 
     /// Regression test for a gimbal-lock bug: `update_entity` used to sync rotation into the
-    /// script's `ScriptApi` by decomposing the entity's `Quat` to Euler angles every frame
+    /// script's entity handle by decomposing the entity's `Quat` to Euler angles every frame
     /// (`to_euler`/`from_euler` round-tripped each call), which visibly stalled a continuous
     /// single-axis rotation once it crossed 90° (the middle Euler axis is extracted via `asin`,
-    /// capped at \u{b1}90\u{b0}). `rotation` is now carried as a `Quat` end to end (see
-    /// `ScriptApi::rotation`'s doc comment), so accumulating well past 90\u{b0} must still produce
-    /// the correct final orientation.
+    /// capped at ±90°). `rotation` is now carried as a `Quat` end to end (see
+    /// [`EntityHandle::rotation`]'s doc comment), so accumulating well past 90° must still
+    /// produce the correct final orientation.
     #[test]
     fn on_update_rotation_does_not_stall_past_ninety_degrees() {
         let mut world = World::new(test_camera());
@@ -497,7 +856,7 @@ mod runtime_tests {
         );
         world.scripts.insert(entity, ScriptList(vec![ScriptAttachment { path: script_path.clone(), enabled: true }]));
 
-        let mut runtime = ScriptRuntime::new();
+        let mut runtime = test_runtime();
         runtime.start_script(&world, entity, 0, &script_path).expect("script should start");
 
         // Accumulate a full half turn (pi radians) about Y in small per-frame steps.
@@ -505,7 +864,7 @@ mod runtime_tests {
         let steps = 200;
         let dt = std::f32::consts::PI / steps as f32;
         for _ in 0..steps {
-            assert!(runtime.update_entity(&mut world, entity, dt, &input).is_empty());
+            assert!(runtime.update_entity(&mut world, entity, dt, &input, None).is_empty());
         }
 
         let rotation = world.transforms.get(entity).unwrap().rotation;
@@ -514,5 +873,328 @@ mod runtime_tests {
             rotated_x.abs_diff_eq(-Vec3::X, 1e-3),
             "expected a 180\u{b0} Y rotation to flip +X to -X, got {rotated_x:?} (rotation stalled around 90\u{b0}?)"
         );
+    }
+
+    #[test]
+    fn on_update_reads_another_entitys_position_via_find() {
+        let mut world = World::new(test_camera());
+        world.spawn_empty("Target", Transform { position: Vec3::new(3.0, 0.0, 0.0), ..Transform::default() });
+        let reader = world.spawn_empty("Reader", Transform::default());
+        let script_path = write_script(
+            "read_other.rhai",
+            r#"
+            let on_update = |dt, input| {
+                let other = world.find("Target");
+                entity.x = other.x;
+            };
+            "#,
+        );
+        world.scripts.insert(reader, ScriptList(vec![ScriptAttachment { path: script_path.clone(), enabled: true }]));
+
+        let mut runtime = test_runtime();
+        runtime.start_script(&world, reader, 0, &script_path).expect("script should start");
+        runtime.begin_frame(&world);
+
+        let input = no_input();
+        assert!(runtime.update_entity(&mut world, reader, 0.1, &input, None).is_empty());
+
+        assert_eq!(world.transforms.get(reader).unwrap().position.x, 3.0);
+    }
+
+    #[test]
+    fn on_update_writes_another_entitys_position_via_find() {
+        let mut world = World::new(test_camera());
+        let target = world.spawn_empty("Target", Transform::default());
+        let mover = world.spawn_empty("Mover", Transform::default());
+        let script_path = write_script(
+            "move_other.rhai",
+            r#"
+            let on_update = |dt, input| {
+                world.find("Target").translate(1.0, 0.0, 0.0);
+            };
+            "#,
+        );
+        world.scripts.insert(mover, ScriptList(vec![ScriptAttachment { path: script_path.clone(), enabled: true }]));
+
+        let mut runtime = test_runtime();
+        runtime.start_script(&world, mover, 0, &script_path).expect("script should start");
+        runtime.begin_frame(&world);
+
+        let input = no_input();
+        assert!(runtime.update_entity(&mut world, mover, 0.1, &input, None).is_empty());
+
+        assert_eq!(world.transforms.get(target).unwrap().position.x, 1.0);
+    }
+
+    #[test]
+    fn find_on_a_missing_name_returns_unit_rather_than_erroring() {
+        let mut world = World::new(test_camera());
+        let entity = world.spawn_empty("Lonely", Transform::default());
+        let script_path = write_script(
+            "find_missing.rhai",
+            r#"
+            let on_update = |dt, input| {
+                let missing = world.find("NoSuchEntity");
+                if missing == () {
+                    entity.x = 42.0;
+                }
+            };
+            "#,
+        );
+        world.scripts.insert(entity, ScriptList(vec![ScriptAttachment { path: script_path.clone(), enabled: true }]));
+
+        let mut runtime = test_runtime();
+        runtime.start_script(&world, entity, 0, &script_path).expect("script should start");
+        runtime.begin_frame(&world);
+
+        let input = no_input();
+        assert!(runtime.update_entity(&mut world, entity, 0.1, &input, None).is_empty());
+
+        assert_eq!(world.transforms.get(entity).unwrap().position.x, 42.0);
+    }
+
+    #[test]
+    fn cross_entity_reads_are_frozen_at_frame_start() {
+        // A moves itself, then B reads A's position via find() in the same frame: B should see
+        // A's position as of the start of the frame, not A's already-applied move.
+        let mut world = World::new(test_camera());
+        let a = world.spawn_empty("A", Transform::default());
+        let b = world.spawn_empty("B", Transform::default());
+        let a_script = write_script(
+            "a_moves.rhai",
+            r#"let on_update = |dt, input| { entity.translate(10.0, 0.0, 0.0); };"#,
+        );
+        let b_script = write_script(
+            "b_reads_a.rhai",
+            r#"let on_update = |dt, input| { entity.x = world.find("A").x; };"#,
+        );
+        world.scripts.insert(a, ScriptList(vec![ScriptAttachment { path: a_script.clone(), enabled: true }]));
+        world.scripts.insert(b, ScriptList(vec![ScriptAttachment { path: b_script.clone(), enabled: true }]));
+
+        let mut runtime = test_runtime();
+        runtime.start_script(&world, a, 0, &a_script).expect("a should start");
+        runtime.start_script(&world, b, 0, &b_script).expect("b should start");
+        runtime.begin_frame(&world);
+
+        let input = no_input();
+        assert!(runtime.update_entity(&mut world, a, 0.1, &input, None).is_empty());
+        assert!(runtime.update_entity(&mut world, b, 0.1, &input, None).is_empty());
+
+        assert_eq!(world.transforms.get(a).unwrap().position.x, 10.0, "A should have moved");
+        assert_eq!(
+            world.transforms.get(b).unwrap().position.x,
+            0.0,
+            "B's read of A via find() should reflect A's position at the start of the frame, not A's move this same frame"
+        );
+    }
+
+    #[test]
+    fn on_update_despawns_another_entity() {
+        let mut world = World::new(test_camera());
+        let target = world.spawn_empty("Target", Transform::default());
+        let killer = world.spawn_empty("Killer", Transform::default());
+        let script_path = write_script(
+            "despawn_other.rhai",
+            r#"let on_update = |dt, input| { world.find("Target").despawn(); };"#,
+        );
+        world.scripts.insert(killer, ScriptList(vec![ScriptAttachment { path: script_path.clone(), enabled: true }]));
+
+        let mut runtime = test_runtime();
+        runtime.start_script(&world, killer, 0, &script_path).expect("script should start");
+        runtime.begin_frame(&world);
+
+        let input = no_input();
+        assert!(runtime.update_entity(&mut world, killer, 0.1, &input, None).is_empty());
+
+        assert!(!world.is_alive(target));
+    }
+
+    #[test]
+    fn self_despawn_stops_remaining_attachments_this_frame() {
+        let mut world = World::new(test_camera());
+        let entity = world.spawn_empty("SelfDestruct", Transform::default());
+        let despawn_script = write_script("despawn_self.rhai", r#"let on_update = |dt, input| { entity.despawn(); };"#);
+        let mover_script = write_script(
+            "mover_after_despawn.rhai",
+            r#"let on_update = |dt, input| { entity.translate(1.0, 0.0, 0.0); };"#,
+        );
+        world.scripts.insert(
+            entity,
+            ScriptList(vec![
+                ScriptAttachment { path: despawn_script.clone(), enabled: true },
+                ScriptAttachment { path: mover_script.clone(), enabled: true },
+            ]),
+        );
+
+        let mut runtime = test_runtime();
+        runtime.start_script(&world, entity, 0, &despawn_script).expect("script 0 should start");
+        runtime.start_script(&world, entity, 1, &mover_script).expect("script 1 should start");
+        runtime.begin_frame(&world);
+
+        let input = no_input();
+        assert!(runtime.update_entity(&mut world, entity, 0.1, &input, None).is_empty());
+
+        assert!(!world.is_alive(entity), "entity should be despawned");
+    }
+
+    #[test]
+    fn world_spawn_returns_a_handle_usable_in_the_same_call() {
+        let mut world = World::new(test_camera());
+        let spawner = world.spawn_empty("Spawner", Transform::default());
+        let script_path = write_script(
+            "spawn_and_move.rhai",
+            r#"
+            let on_update = |dt, input| {
+                let bullet = world.spawn_entity("Bullet", 1.0, 2.0, 3.0);
+                bullet.translate(1.0, 0.0, 0.0);
+            };
+            "#,
+        );
+        world.scripts.insert(spawner, ScriptList(vec![ScriptAttachment { path: script_path.clone(), enabled: true }]));
+
+        let mut runtime = test_runtime();
+        runtime.start_script(&world, spawner, 0, &script_path).expect("script should start");
+        runtime.begin_frame(&world);
+
+        let input = no_input();
+        assert!(runtime.update_entity(&mut world, spawner, 0.1, &input, None).is_empty());
+
+        let spawned = world
+            .iter_entities()
+            .find(|&e| e != spawner && world.names.get(e).is_some_and(|n| n.0 == "Bullet"))
+            .expect("a Bullet entity should have been spawned");
+        let position = world.transforms.get(spawned).unwrap().position;
+        assert!(
+            position.abs_diff_eq(Vec3::new(2.0, 2.0, 3.0), 1e-5),
+            "expected spawn position (1,2,3) plus a same-call translate(1,0,0), got {position:?}"
+        );
+    }
+
+    #[test]
+    fn on_update_renames_self_and_another_entity() {
+        let mut world = World::new(test_camera());
+        let other = world.spawn_empty("Old Name", Transform::default());
+        let renamer = world.spawn_empty("Renamer", Transform::default());
+        let script_path = write_script(
+            "rename.rhai",
+            r#"
+            let on_update = |dt, input| {
+                entity.set_name("New Renamer Name");
+                world.find("Old Name").set_name("New Name");
+            };
+            "#,
+        );
+        world.scripts.insert(renamer, ScriptList(vec![ScriptAttachment { path: script_path.clone(), enabled: true }]));
+
+        let mut runtime = test_runtime();
+        runtime.start_script(&world, renamer, 0, &script_path).expect("script should start");
+        runtime.begin_frame(&world);
+
+        let input = no_input();
+        assert!(runtime.update_entity(&mut world, renamer, 0.1, &input, None).is_empty());
+
+        assert_eq!(world.names.get(renamer).unwrap().0, "New Renamer Name");
+        assert_eq!(world.names.get(other).unwrap().0, "New Name");
+    }
+
+    #[test]
+    fn attach_script_starts_running_within_the_same_session() {
+        let mut world = World::new(test_camera());
+        let entity = world.spawn_empty("LateBloomer", Transform::default());
+        let mover_script = write_script("late_mover.rhai", r#"let on_update = |dt, input| { entity.translate(1.0, 0.0, 0.0); };"#);
+        let attacher_script = write_script(
+            "attacher.rhai",
+            &format!(
+                r#"let on_update = |dt, input| {{ entity.attach_script("{}"); }};"#,
+                mover_script.display().to_string().replace('\\', "\\\\")
+            ),
+        );
+        world.scripts.insert(entity, ScriptList(vec![ScriptAttachment { path: attacher_script.clone(), enabled: true }]));
+
+        let mut runtime = test_runtime();
+        runtime.start_script(&world, entity, 0, &attacher_script).expect("attacher should start");
+        runtime.begin_frame(&world);
+
+        let input = no_input();
+        // First frame: the attacher queues attach_script, which is applied (and started) during
+        // this same update_entity call.
+        assert!(runtime.update_entity(&mut world, entity, 0.1, &input, None).is_empty());
+        assert_eq!(
+            world.scripts.get(entity).unwrap().0.len(),
+            2,
+            "the attached mover script should now be in the entity's ScriptList"
+        );
+
+        // Second frame: the newly-attached mover script should actually run now, not just sit
+        // there inert until a hypothetical Stop/Play.
+        runtime.begin_frame(&world);
+        assert!(runtime.update_entity(&mut world, entity, 0.1, &input, None).is_empty());
+        assert!(
+            world.transforms.get(entity).unwrap().position.x > 0.0,
+            "the attached script should have moved the entity by its second frame"
+        );
+    }
+
+    // `set_sprite`/`set_model` need a live `Renderer` (a real GPU device) to actually load
+    // anything, which a unit test has no portable way to stand up — see
+    // `world::tests::clone_is_independent_of_the_original`'s doc comment for the same
+    // constraint. What *is* testable without one is the graceful-failure path (`renderer: None`
+    // reports a `ScriptError` instead of panicking or silently doing nothing) and
+    // `detach_renderable`, which touches no GPU state at all.
+
+    #[test]
+    fn set_sprite_without_a_renderer_reports_an_error_instead_of_panicking() {
+        let mut world = World::new(test_camera());
+        let entity = world.spawn_empty("NeedsASprite", Transform::default());
+        let script_path = write_script(
+            "set_sprite.rhai",
+            r#"let on_update = |dt, input| { entity.set_sprite("assets/textures/missing.png"); };"#,
+        );
+        world.scripts.insert(entity, ScriptList(vec![ScriptAttachment { path: script_path.clone(), enabled: true }]));
+
+        let mut runtime = test_runtime();
+        runtime.start_script(&world, entity, 0, &script_path).expect("script should start");
+        runtime.begin_frame(&world);
+
+        let errors = runtime.update_entity(&mut world, entity, 0.1, &no_input(), None);
+        assert_eq!(errors.len(), 1, "expected one error reporting the missing renderer, got {errors:?}");
+        assert!(world.renderables.get(entity).is_none(), "nothing should have been attached");
+    }
+
+    #[test]
+    fn set_model_without_a_renderer_reports_an_error_instead_of_panicking() {
+        let mut world = World::new(test_camera());
+        let entity = world.spawn_empty("NeedsAModel", Transform::default());
+        let script_path = write_script(
+            "set_model.rhai",
+            r#"let on_update = |dt, input| { entity.set_model("assets/models/missing.obj"); };"#,
+        );
+        world.scripts.insert(entity, ScriptList(vec![ScriptAttachment { path: script_path.clone(), enabled: true }]));
+
+        let mut runtime = test_runtime();
+        runtime.start_script(&world, entity, 0, &script_path).expect("script should start");
+        runtime.begin_frame(&world);
+
+        let errors = runtime.update_entity(&mut world, entity, 0.1, &no_input(), None);
+        assert_eq!(errors.len(), 1, "expected one error reporting the missing renderer, got {errors:?}");
+        assert!(world.renderables.get(entity).is_none(), "nothing should have been attached");
+    }
+
+    #[test]
+    fn detach_renderable_needs_no_renderer() {
+        let mut world = World::new(test_camera());
+        let entity = world.spawn_empty("MaybeVisible", Transform::default());
+        let script_path = write_script("detach.rhai", r#"let on_update = |dt, input| { entity.detach_renderable(); };"#);
+        world.scripts.insert(entity, ScriptList(vec![ScriptAttachment { path: script_path.clone(), enabled: true }]));
+
+        let mut runtime = test_runtime();
+        runtime.start_script(&world, entity, 0, &script_path).expect("script should start");
+        runtime.begin_frame(&world);
+
+        // No renderable was ever attached, so this also doubles as a no-op-if-absent check —
+        // the point is that it doesn't error or panic for lack of a renderer, unlike set_sprite/
+        // set_model above.
+        assert!(runtime.update_entity(&mut world, entity, 0.1, &no_input(), None).is_empty());
+        assert!(world.renderables.get(entity).is_none());
     }
 }

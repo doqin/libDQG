@@ -10,6 +10,7 @@ pub struct Entity {
 
 /// Allocates and recycles [`Entity`] indices, bumping an index's generation on despawn so any
 /// `Entity` handle still held to it goes stale rather than aliasing whatever is spawned next.
+#[derive(Clone)]
 pub(crate) struct EntityAllocator {
     generations: Vec<u32>,
     free_list: Vec<u32>,

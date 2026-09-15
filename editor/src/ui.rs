@@ -79,7 +79,11 @@ fn draw_menu_bar(
                     }
                     ui.close();
                 }
-                ui.add_enabled_ui(project.is_some(), |ui| {
+                // Also disabled during Play: scripts can now spawn/despawn/rename entities and
+                // attach scripts, all of which are meant to be ephemeral and revert on Stop (see
+                // EditorScene::stop_play) — saving mid-Play would bake that Play-time state into
+                // the scene file instead.
+                ui.add_enabled_ui(project.is_some() && !is_playing, |ui| {
                     if ui.button("Save").clicked() {
                         if let Some(project) = project {
                             if let Err(e) = project.save_scene(world, entity_assets) {
