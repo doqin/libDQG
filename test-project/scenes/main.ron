@@ -27,8 +27,8 @@
         (
             name: "kako_sprite",
             transform: (
-                position: (-1.2, 0.4, -5.2),
-                rotation: (0.0, 0.24615328, 0.0, 0.9692309),
+                position: (-2.95, -0.2, -5.2),
+                rotation: (-0.0, -0.25881904, 0.0, 0.9659258),
                 scale: (1.0, 1.0, 1.0),
             ),
             renderable: Some(Sprite(
@@ -73,6 +73,14 @@
                 ),
                 (
                     path: "scripts\\fly.rhai",
+                    enabled: true,
+                ),
+                (
+                    path: "scripts\\marx_follow.rhai",
+                    enabled: true,
+                ),
+                (
+                    path: "scripts\\spawn_kako_cube.rhai",
                     enabled: true,
                 ),
             ],
