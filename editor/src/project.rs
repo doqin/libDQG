@@ -84,14 +84,9 @@ impl RenderableAsset {
                     sprite.width = *width;
                     sprite.height = *height;
                 } else {
-                    // No saved/explicit size (the placeholder `attach_renderable` probes with
-                    // before it knows the real one) — `Sprite::new` just sized the quad to the
-                    // texture's native *pixel* dimensions, which is normally far too big as a
-                    // *world-unit* size, so normalize it to fit a 1x1 unit square instead,
-                    // preserving the texture's aspect ratio.
-                    let longest_side = sprite.width.max(sprite.height).max(1.0);
-                    sprite.width /= longest_side;
-                    sprite.height /= longest_side;
+                    // No saved/explicit size — this is the placeholder `attach_renderable`
+                    // probes with before it knows the real one.
+                    sprite.fit_within_unit_square();
                 }
                 Ok(Renderable::Sprite(sprite))
             }

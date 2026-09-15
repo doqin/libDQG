@@ -17,6 +17,7 @@ pub(crate) struct ModelUniform {
     pub(crate) highlight: [f32; 4],
 }
 
+#[derive(Clone)]
 pub struct Model {
     pub meshes: Vec<Mesh>,
     pub materials: Vec<Material>,
@@ -37,6 +38,7 @@ pub struct Model {
     pub(crate) transform_bind_group: wgpu::BindGroup,
 }
 
+#[derive(Clone)]
 pub struct Mesh {
     pub name: String,
     pub vertex_buffer: wgpu::Buffer,
@@ -51,6 +53,7 @@ pub struct Mesh {
     pub indices: Vec<u32>,
 }
 
+#[derive(Clone)]
 pub struct Material {
     pub name: String,
     pub diffuse_texture: Arc<Texture>,

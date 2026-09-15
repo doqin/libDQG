@@ -4,6 +4,7 @@ use crate::types::Color;
 
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct Sprite {
     pub texture: Arc<Texture>,
     pub x: f32,
@@ -59,6 +60,17 @@ impl Sprite {
             self.transform,
             &self.texture.bind_group,
         );
+    }
+
+    /// Rescales `width`/`height` (preserving aspect ratio) so the sprite fits within a 1×1 unit
+    /// square in world space, without ever upscaling past its current size. [`Sprite::new`] sizes
+    /// the quad to the texture's native *pixel* dimensions, which is normally far too large as a
+    /// *world-unit* size — call this right after construction when the caller has no better size
+    /// of its own to apply (e.g. attaching a sprite with no explicit width/height).
+    pub fn fit_within_unit_square(&mut self) {
+        let longest_side = self.width.max(self.height).max(1.0);
+        self.width /= longest_side;
+        self.height /= longest_side;
     }
 
     /// Draws the sprite as a quad in world space, transformed by the camera.

@@ -3,14 +3,14 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use libdqg::camera::Camera;
-use libdqg::ecs::{ComponentStore, Entity};
+use libdqg::ecs::Entity;
 use libdqg::glam;
 use libdqg::input::{InputState, MouseState};
 use libdqg::renderer::{DrawPass, Renderer};
 use libdqg::scene::{Scene, SceneTransition};
 use libdqg::scripting::{ScriptError, ScriptList, ScriptRuntime};
 use libdqg::types::Color;
-use libdqg::world::{Renderable, Transform, World};
+use libdqg::world::{Renderable, World};
 
 use crate::editor_settings::EditorSettings;
 use crate::egui_layer::EguiLayer;
@@ -29,14 +29,15 @@ const LOAD_BUDGET_PER_FRAME: Duration = Duration::from_millis(8);
 /// ages out on its own, so a one-off error doesn't linger forever if the user doesn't hit Stop.
 const SCRIPT_ERROR_DISPLAY: Duration = Duration::from_secs(6);
 
-/// Whether the editor is authoring the scene or running it live. Play snapshots
-/// [`World::transforms`] and starts a [`ScriptRuntime`]; Stop restores the snapshot and drops the
-/// runtime (and every script's state with it) — see [`EditorScene::start_play`]/[`stop_play`] and
-/// the implementation plan's "Play/Stop snapshot" note for why a `Transform`-only snapshot is
-/// only valid as long as v1 scripts can't touch anything but their own entity's `Transform`.
+/// Whether the editor is authoring the scene or running it live. Play snapshots the whole
+/// [`World`] and starts a [`ScriptRuntime`]; Stop restores the snapshot and drops the runtime
+/// (and every script's state with it) — see [`EditorScene::start_play`]/[`stop_play`]. A
+/// whole-`World` snapshot (not just `Transform`) is what makes scripts that spawn/despawn/rename
+/// entities or attach scripts fully revert on Stop, the same way a Transform-only snapshot
+/// already made translate/rotate/scale revert.
 enum EditorMode {
     Edit,
-    Playing { transform_snapshot: ComponentStore<Transform>, runtime: ScriptRuntime },
+    Playing { world_snapshot: World, runtime: ScriptRuntime },
 }
 
 /// What the editor scene should do with a project root on its first `update`, once a
@@ -213,14 +214,14 @@ impl EditorScene {
         }
     }
 
-    /// Snapshots [`World::transforms`] and starts every enabled script attachment (in order) on
+    /// Snapshots the whole [`World`] and starts every enabled script attachment (in order) on
     /// every entity that has one, then switches to [`EditorMode::Playing`]. A no-op if there's no
     /// open project (the Play button is disabled in that case anyway — see `ui::draw_menu_bar`).
     fn start_play(&mut self) {
         let Some(project) = self.project.as_ref() else { return };
 
-        let transform_snapshot = self.world.transforms.clone();
-        let mut runtime = ScriptRuntime::new();
+        let world_snapshot = self.world.clone();
+        let mut runtime = ScriptRuntime::new(project.root.clone());
 
         for entity in self.world.iter_entities().collect::<Vec<_>>() {
             let Some(list) = self.world.scripts.get(entity) else { continue };
@@ -239,15 +240,15 @@ impl EditorScene {
             }
         }
 
-        self.mode = EditorMode::Playing { transform_snapshot, runtime };
+        self.mode = EditorMode::Playing { world_snapshot, runtime };
     }
 
-    /// Restores the transforms [`start_play`](Self::start_play) snapshotted and drops the
+    /// Restores the whole [`World`] [`start_play`](Self::start_play) snapshotted and drops the
     /// [`ScriptRuntime`] (and with it every script's persistent state), switching back to
     /// [`EditorMode::Edit`].
     fn stop_play(&mut self) {
-        if let EditorMode::Playing { transform_snapshot, .. } = std::mem::replace(&mut self.mode, EditorMode::Edit) {
-            self.world.transforms = transform_snapshot;
+        if let EditorMode::Playing { world_snapshot, .. } = std::mem::replace(&mut self.mode, EditorMode::Edit) {
+            self.world = world_snapshot;
         }
         self.script_errors.clear();
     }
@@ -389,8 +390,9 @@ impl Scene for EditorScene {
                 // runs scripts against the live World; see the implementation plan's
                 // "Camera/picking fully disabled during Play" note.
                 self.hovered = None;
+                runtime.begin_frame(&self.world);
                 for entity in self.world.iter_entities().collect::<Vec<_>>() {
-                    for error in runtime.update_entity(&mut self.world, entity, delta_time, input_state) {
+                    for error in runtime.update_entity(&mut self.world, entity, delta_time, input_state, Some(&*renderer)) {
                         self.script_errors.push((format_script_error(&error), Instant::now()));
                     }
                 }

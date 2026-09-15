@@ -31,10 +31,12 @@ impl Transform {
     }
 }
 
+#[derive(Clone)]
 pub struct Name(pub String);
 
 /// What an entity draws as. An entity is a sprite or a model, never both, so this is one enum
 /// rather than two parallel component stores that would otherwise need to be kept in sync.
+#[derive(Clone)]
 pub enum Renderable {
     Sprite(Sprite),
     Model(Model),
@@ -75,6 +77,12 @@ impl Renderable {
 /// A spatial container of entities, distinct from [`crate::scene::Scene`] (which means
 /// "game state/screen" in this framework, not a place). Each entity is a [`Transform`] plus a
 /// [`Renderable`] and an optional [`Name`].
+///
+/// `Clone` is cheap and GPU-allocation-free: a cloned [`Renderable`]'s `wgpu::Buffer`/
+/// `wgpu::BindGroup` handles are refcount copies of the same GPU resource, not duplicates (wgpu
+/// itself derives `Clone` for both). The editor relies on this to snapshot the whole `World`
+/// before entering Play and restore it wholesale on Stop.
+#[derive(Clone)]
 pub struct World {
     allocator: EntityAllocator,
     pub transforms: ComponentStore<Transform>,
@@ -162,5 +170,38 @@ mod tests {
         world.despawn(entity);
 
         assert!(world.scripts.get(entity).is_none());
+    }
+
+    /// Guards the editor's Play/Stop snapshot-and-restore, which relies on `World::clone()`
+    /// producing an independent copy (see [`World`]'s doc comment) — a future change that made
+    /// some field shallow/shared (e.g. wrapping a component store in an `Rc` for some other
+    /// reason) would silently break Stop's revert-to-pre-Play guarantee without this test
+    /// catching it. Doesn't exercise a [`Renderable`] directly (that needs a live `Renderer`/GPU
+    /// device to construct, impractical in a unit test), but `Renderable`'s own GPU-backed
+    /// fields are cheap handle clones by construction — `wgpu::Buffer`/`BindGroup`/`Texture` all
+    /// derive `Clone` themselves — so cloning one just copies a handle, never GPU state; what
+    /// this test guards is the plain-data component stores instead.
+    #[test]
+    fn clone_is_independent_of_the_original() {
+        let mut world = World::new(test_camera());
+        let entity = world.spawn_empty("Original", Transform { position: Vec3::new(1.0, 2.0, 3.0), ..Transform::default() });
+        world.scripts.insert(
+            entity,
+            ScriptList(vec![ScriptAttachment { path: PathBuf::from("scripts/move.rhai"), enabled: true }]),
+        );
+
+        let mut clone = world.clone();
+
+        // Mutate the clone in every way Play can mutate a World: move, rename, despawn, and
+        // spawn a brand new entity.
+        clone.transforms.get_mut(entity).unwrap().position = Vec3::ZERO;
+        clone.names.get_mut(entity).unwrap().0 = "Renamed".to_string();
+        clone.scripts.get_mut(entity).unwrap().0[0].enabled = false;
+        let new_entity = clone.spawn_empty("SpawnedDuringPlay", Transform::default());
+
+        assert_eq!(world.transforms.get(entity).unwrap().position, Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(world.names.get(entity).unwrap().0, "Original");
+        assert!(world.scripts.get(entity).unwrap().0[0].enabled);
+        assert!(!world.is_alive(new_entity), "an entity spawned only on the clone shouldn't exist on the original");
     }
 }

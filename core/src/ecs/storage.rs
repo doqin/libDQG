@@ -8,6 +8,14 @@ pub struct ComponentStore<T> {
     slots: Vec<Option<(u32, T)>>,
 }
 
+impl<T> Default for ComponentStore<T> {
+    // Written by hand rather than `#[derive(Default)]`: the derive would add a `T: Default`
+    // bound even though an empty `Vec` needs no such thing from its element type.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> ComponentStore<T> {
     pub fn new() -> Self {
         Self { slots: Vec::new() }
