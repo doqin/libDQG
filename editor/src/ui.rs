@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use libdqg::ecs::Entity;
 use libdqg::glam;
 use libdqg::scripting::{ScriptAttachment, ScriptList};
-use libdqg::world::{Renderable, Transform, World};
+use libdqg::world::{CameraComponent, Renderable, Transform, World};
 
 use crate::editor_settings::EditorSettings;
 use crate::project::{Project, RenderableAsset, RenderableKind};
@@ -123,12 +123,23 @@ fn draw_hierarchy(
         ui.heading("Hierarchy");
         ui.separator();
 
-        if ui.button("+ Add Entity").clicked() {
-            let name = format!("Entity {}", world.iter_entities().count() + 1);
-            let entity = world.spawn_empty(name, Transform::default());
-            *selected = Some(entity);
-            *renaming = None;
-        }
+        ui.menu_button("+ Add Entity", |ui| {
+            if ui.button("Empty").clicked() {
+                let name = format!("Entity {}", world.iter_entities().count() + 1);
+                let entity = world.spawn_empty(name, Transform::default());
+                *selected = Some(entity);
+                *renaming = None;
+                ui.close();
+            }
+            if ui.button("Camera").clicked() {
+                let name = format!("Camera {}", world.iter_entities().count() + 1);
+                let entity = world.spawn_empty(name, Transform::default());
+                world.set_camera(entity, CameraComponent::default());
+                *selected = Some(entity);
+                *renaming = None;
+                ui.close();
+            }
+        });
         ui.separator();
 
         let entities: Vec<Entity> = world.iter_entities().collect();
@@ -177,6 +188,9 @@ fn draw_hierarchy(
                         let new_entity = world.spawn_empty(new_name, *world.transforms.get(entity).unwrap_or(&Transform::default()));
                         if let Some(asset) = entity_assets.get(&entity) {
                             requests.attach_renderable = Some((new_entity, asset.kind(), asset.path().to_path_buf()));
+                        }
+                        if let Some(component) = world.cameras.get(entity).copied() {
+                            world.set_camera(new_entity, component);
                         }
                     }
                     ui.close();
@@ -530,6 +544,8 @@ fn draw_inspector(
             draw_transform_editor(ui, world, entity);
         });
         ui.separator();
+        draw_camera_editor(ui, world, entity);
+        ui.separator();
         draw_renderable_editor(ui, world, entity, project, entity_assets, requests);
         ui.separator();
         draw_script_editor(ui, world, entity, project);
@@ -572,6 +588,56 @@ fn draw_transform_editor(ui: &mut egui::Ui, world: &mut World, entity: Entity) {
         ui.add(egui::DragValue::new(&mut transform.scale.y).speed(0.05).prefix("y: "));
         ui.add(egui::DragValue::new(&mut transform.scale.z).speed(0.05).prefix("z: "));
     });
+}
+
+/// The selected entity's camera lens, if it has one: a checkbox to attach/detach a
+/// [`CameraComponent`] (mirrors `draw_renderable_editor`'s Remove button), then FOV/near/far
+/// fields and an "Active Camera" checkbox once attached. No `UiRequests` indirection is needed
+/// here, unlike attaching a `Renderable` — nothing here loads a GPU resource.
+fn draw_camera_editor(ui: &mut egui::Ui, world: &mut World, entity: Entity) {
+    let mut enabled = world.cameras.get(entity).is_some();
+    if ui.checkbox(&mut enabled, "Camera").changed() {
+        if enabled {
+            world.set_camera(entity, CameraComponent::default());
+        } else {
+            world.clear_camera(entity);
+        }
+    }
+    if !enabled {
+        return;
+    }
+
+    let mut activate: Option<bool> = None;
+    if let Some(component) = world.cameras.get_mut(entity) {
+        ui.horizontal(|ui| {
+            ui.add(egui::DragValue::new(&mut component.fov).speed(0.5).prefix("FOV: ").range(1.0..=179.0));
+        });
+        ui.horizontal(|ui| {
+            ui.add(egui::DragValue::new(&mut component.znear).speed(0.01).prefix("Near: "));
+            ui.add(egui::DragValue::new(&mut component.zfar).speed(0.5).prefix("Far: "));
+        });
+
+        let mut active = component.active;
+        if ui.checkbox(&mut active, "Active Camera (used in Play)").changed() {
+            activate = Some(active);
+        }
+    }
+
+    // Radio-button semantics: clear every other camera's flag when this one turns on, so
+    // World::active_camera never has to arbitrate between two "active" entities in practice.
+    match activate {
+        Some(true) => {
+            for (other, component) in world.cameras.iter_mut() {
+                component.active = other == entity;
+            }
+        }
+        Some(false) => {
+            if let Some(component) = world.cameras.get_mut(entity) {
+                component.active = false;
+            }
+        }
+        None => {}
+    }
 }
 
 fn draw_renderable_editor(

@@ -10,7 +10,7 @@ use rhai::{CustomType, Dynamic, Engine, FnPtr, Scope, TypeBuilder, AST};
 use serde::{Deserialize, Serialize};
 
 use crate::ecs::{ComponentStore, Entity};
-use crate::input::InputState;
+use crate::input::{InputState, MouseState};
 use crate::renderer::{Model, Renderer, Sprite, Texture};
 use crate::types::KeyCode;
 use crate::world::{Name, Renderable, Transform, World};
@@ -151,8 +151,8 @@ struct EntityHandle {
 impl EntityHandle {
     /// Everything the field-level `#[rhai_type]` attributes on [`EntityHandle`] can't express as
     /// a plain property: the `x`/`y`/`z` get/set pair (custom, not auto, since the setters must
-    /// also queue a [`WorldCommand::SetTransform`]) and the `translate`/`rotate`/`scale`/
-    /// `name`/`set_name`/`despawn`/`attach_script`/`set_script_enabled`/`set_sprite`/
+    /// also queue a [`WorldCommand::SetTransform`]) and the `translate`/`rotate`/`look_at`/
+    /// `scale`/`name`/`set_name`/`despawn`/`attach_script`/`set_script_enabled`/`set_sprite`/
     /// `set_model`/`detach_renderable` methods.
     fn register_extra(builder: &mut TypeBuilder<Self>) {
         builder
@@ -178,6 +178,21 @@ impl EntityHandle {
                 let delta = Quat::from_euler(glam::EulerRot::XYZ, x as f32, y as f32, z as f32);
                 e.rotation = (e.rotation * delta).normalize();
                 e.queue_transform_update();
+            })
+            .with_fn("look_at", |e: &mut Self, x: f64, y: f64, z: f64| {
+                let position = Vec3::new(e.x as f32, e.y as f32, e.z as f32);
+                let direction = Vec3::new(x as f32, y as f32, z as f32) - position;
+                // A zero-length direction (looking at your own position) has no meaningful
+                // rotation to face — leave the current rotation alone rather than feeding
+                // `from_rotation_arc` a NaN from normalizing a zero vector.
+                if direction.length_squared() > 1e-12 {
+                    // Sets rotation absolutely (unlike `rotate`, which composes a delta) so the
+                    // entity faces `(x, y, z)` down its local -Z axis — the same "forward" every
+                    // camera entity's `CameraComponent` assumes (see `world::CameraComponent`),
+                    // so this doubles as "point this camera at" for a camera entity.
+                    e.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, direction.normalize());
+                    e.queue_transform_update();
+                }
             })
             .with_fn("scale", |e: &mut Self, x: f64, y: f64, z: f64| {
                 e.scale *= Vec3::new(x as f32, y as f32, z as f32);
@@ -292,16 +307,18 @@ impl ScriptWorld {
     }
 }
 
-/// A read-only keyboard snapshot passed as `on_update`'s second argument:
+/// A read-only keyboard/mouse snapshot passed as `on_update`'s second argument:
 /// `let on_update = |dt, input| { if input.is_held("KeyW") { entity.translate(0.0, 0.0, -dt); } };`.
 /// Key names match [`KeyCode`]'s own variant identifiers via [`KeyCode::from_name`] (its derived
 /// `Debug` output prints the same strings) — e.g. `"KeyW"`, `"ArrowUp"`, `"Space"`,
-/// `"ShiftLeft"`. An unrecognized name is simply never held/pressed rather than an error, so a
-/// typo in a key name fails quietly instead of aborting the script.
+/// `"ShiftLeft"`. Mouse button names match [`winit::event::MouseButton`]'s own variant
+/// identifiers via [`mouse_button_from_name`] — `"Left"`, `"Right"`, `"Middle"`, `"Back"`,
+/// `"Forward"`. An unrecognized name is simply never held/pressed rather than an error, so a
+/// typo in a key/button name fails quietly instead of aborting the script.
 ///
-/// Rebuilt fresh from [`InputState`] every [`ScriptRuntime::update_entity`] call rather than
-/// synced in/out like [`EntityHandle`] — input is read-only from a script's perspective, so
-/// there's nothing to write back.
+/// Rebuilt fresh from [`InputState`]/[`MouseState`] every [`ScriptRuntime::update_entity`] call
+/// rather than synced in/out like [`EntityHandle`] — input is read-only from a script's
+/// perspective, so there's nothing to write back.
 #[derive(Clone, CustomType)]
 #[rhai_type(name = "Input", extra = Self::register_extra)]
 struct ScriptInput {
@@ -309,11 +326,37 @@ struct ScriptInput {
     held: HashSet<KeyCode>,
     #[rhai_type(skip)]
     pressed: HashSet<KeyCode>,
+    #[rhai_type(skip)]
+    mouse_held: HashSet<winit::event::MouseButton>,
+    #[rhai_type(skip)]
+    mouse_pressed: HashSet<winit::event::MouseButton>,
+    #[rhai_type(skip)]
+    mouse_x: f64,
+    #[rhai_type(skip)]
+    mouse_y: f64,
+    /// Mouse movement since last frame — the usual building block for a mouse-look camera.
+    #[rhai_type(skip)]
+    mouse_dx: f64,
+    #[rhai_type(skip)]
+    mouse_dy: f64,
+    #[rhai_type(skip)]
+    mouse_wheel: f64,
 }
 
 impl ScriptInput {
-    fn from_state(input: &InputState) -> Self {
-        Self { held: input.keys_held().collect(), pressed: input.keys_pressed().collect() }
+    fn from_state(input: &InputState, mouse: &MouseState, mouse_delta: (f32, f32)) -> Self {
+        let (mouse_x, mouse_y) = mouse.position();
+        Self {
+            held: input.keys_held().collect(),
+            pressed: input.keys_pressed().collect(),
+            mouse_held: mouse.buttons_held().collect(),
+            mouse_pressed: mouse.buttons_pressed().collect(),
+            mouse_x: mouse_x as f64,
+            mouse_y: mouse_y as f64,
+            mouse_dx: mouse_delta.0 as f64,
+            mouse_dy: mouse_delta.1 as f64,
+            mouse_wheel: mouse.wheel_delta() as f64,
+        }
     }
 
     fn register_extra(builder: &mut TypeBuilder<Self>) {
@@ -323,8 +366,35 @@ impl ScriptInput {
             })
             .with_fn("is_pressed", |i: &mut Self, name: &str| {
                 KeyCode::from_name(name).is_some_and(|key| i.pressed.contains(&key))
-            });
+            })
+            .with_fn("is_mouse_held", |i: &mut Self, name: &str| {
+                mouse_button_from_name(name).is_some_and(|button| i.mouse_held.contains(&button))
+            })
+            .with_fn("is_mouse_pressed", |i: &mut Self, name: &str| {
+                mouse_button_from_name(name).is_some_and(|button| i.mouse_pressed.contains(&button))
+            })
+            .with_fn("mouse_x", |i: &mut Self| i.mouse_x)
+            .with_fn("mouse_y", |i: &mut Self| i.mouse_y)
+            .with_fn("mouse_dx", |i: &mut Self| i.mouse_dx)
+            .with_fn("mouse_dy", |i: &mut Self| i.mouse_dy)
+            .with_fn("mouse_wheel", |i: &mut Self| i.mouse_wheel);
     }
+}
+
+/// Parses a mouse button name matching [`winit::event::MouseButton`]'s own variant identifiers
+/// (the same strings its derived `Debug` output prints for its unit variants) — used by
+/// [`ScriptInput`] so a `.rhai` script can reference a mouse button by name, the same way
+/// [`KeyCode::from_name`] does for the keyboard. `Other(_)` (extra vendor-specific buttons) has
+/// no name-based way to reach it, since there's no stable name for an arbitrary button index.
+fn mouse_button_from_name(name: &str) -> Option<winit::event::MouseButton> {
+    Some(match name {
+        "Left" => winit::event::MouseButton::Left,
+        "Right" => winit::event::MouseButton::Right,
+        "Middle" => winit::event::MouseButton::Middle,
+        "Back" => winit::event::MouseButton::Back,
+        "Forward" => winit::event::MouseButton::Forward,
+        _ => return None,
+    })
 }
 
 /// One error from compiling, starting, or running a script — never fatal to the editor, just
@@ -470,17 +540,24 @@ impl ScriptRuntime {
     /// asset needs a live GPU device); pass `None` when one isn't available (e.g. in a test with
     /// no real `Renderer`) and any such command just reports a [`ScriptError`] instead of
     /// silently doing nothing or panicking.
+    ///
+    /// `mouse_delta` is the caller's responsibility, same as it is for
+    /// `editor::fly_camera::FlyCamera::update` — `MouseState` only tracks position, not
+    /// frame-to-frame movement, so the caller (which already diffs `MouseState::position()`
+    /// against last frame's for its own fly camera) passes it through directly.
     pub fn update_entity(
         &mut self,
         world: &mut World,
         entity: Entity,
         dt: f32,
         input: &InputState,
+        mouse: &MouseState,
+        mouse_delta: (f32, f32),
         renderer: Option<&Renderer>,
     ) -> Vec<ScriptError> {
         let mut errors = Vec::new();
         let Some(attachments) = world.scripts.get(entity).cloned() else { return errors };
-        let input = ScriptInput::from_state(input);
+        let input = ScriptInput::from_state(input, mouse, mouse_delta);
 
         for (index, attachment) in attachments.0.iter().enumerate() {
             if !attachment.enabled {
@@ -726,12 +803,18 @@ mod runtime_tests {
     use crate::world::Transform;
 
     fn test_camera() -> Camera {
-        Camera { eye: Vec3::ZERO, target: Vec3::Z, up: Vec3::Y, aspect: 1.0, fov: 45.0, znear: 0.1, zfar: 100.0 }
+        Camera { position: Vec3::ZERO, yaw: 0.0, pitch: 0.0, aspect: 1.0, fov: 45.0, znear: 0.1, zfar: 100.0 }
     }
 
     /// An [`InputState`] with nothing held/pressed, for tests that don't care about input.
     fn no_input() -> InputState {
         InputState::for_test([], [])
+    }
+
+    /// A [`MouseState`] with nothing held/pressed/moved, for tests that don't care about mouse
+    /// input.
+    fn no_mouse() -> MouseState {
+        MouseState::new()
     }
 
     fn test_runtime() -> ScriptRuntime {
@@ -768,8 +851,8 @@ mod runtime_tests {
         runtime.start_script(&world, entity, 0, &script_path).expect("script should start");
 
         let input = no_input();
-        assert!(runtime.update_entity(&mut world, entity, 0.5, &input, None).is_empty());
-        assert!(runtime.update_entity(&mut world, entity, 0.5, &input, None).is_empty());
+        assert!(runtime.update_entity(&mut world, entity, 0.5, &input, &no_mouse(), (0.0, 0.0), None).is_empty());
+        assert!(runtime.update_entity(&mut world, entity, 0.5, &input, &no_mouse(), (0.0, 0.0), None).is_empty());
 
         let position = world.transforms.get(entity).unwrap().position;
         assert!((position.x - 1.0).abs() < 1e-5, "expected x\u{2248}1.0 after two 0.5s updates, got {position:?}");
@@ -787,7 +870,7 @@ mod runtime_tests {
 
         let input = no_input();
         for _ in 0..MAX_CONSECUTIVE_FAILURES {
-            let errors = runtime.update_entity(&mut world, entity, 0.1, &input, None);
+            let errors = runtime.update_entity(&mut world, entity, 0.1, &input, &no_mouse(), (0.0, 0.0), None);
             assert_eq!(errors.len(), 1);
         }
 
@@ -795,7 +878,7 @@ mod runtime_tests {
         assert!(!attachment_enabled, "attachment should auto-disable after MAX_CONSECUTIVE_FAILURES errors");
 
         // Disabled, so no further errors should be produced even though the script still throws.
-        assert!(runtime.update_entity(&mut world, entity, 0.1, &input, None).is_empty());
+        assert!(runtime.update_entity(&mut world, entity, 0.1, &input, &no_mouse(), (0.0, 0.0), None).is_empty());
     }
 
     #[test]
@@ -825,12 +908,54 @@ mod runtime_tests {
         runtime.start_script(&world, entity, 0, &script_path).expect("script should start");
 
         let input = InputState::for_test([KeyCode::KeyW], [KeyCode::Space]);
-        assert!(runtime.update_entity(&mut world, entity, 1.0, &input, None).is_empty());
+        assert!(runtime.update_entity(&mut world, entity, 1.0, &input, &no_mouse(), (0.0, 0.0), None).is_empty());
 
         let position = world.transforms.get(entity).unwrap().position;
         assert!(
             position.abs_diff_eq(Vec3::new(1.0, 0.0, -1.0), 1e-5),
             "expected held KeyW and pressed Space to both apply, got {position:?}"
+        );
+    }
+
+    #[test]
+    fn on_update_sees_mouse_state() {
+        let mut world = World::new(test_camera());
+        let entity = world.spawn_empty("MouseListener", Transform::default());
+        let script_path = write_script(
+            "mouse.rhai",
+            r#"
+            let on_update = |dt, input| {
+                if input.is_mouse_held("Left") {
+                    entity.translate(0.0, 0.0, -1.0);
+                }
+                if input.is_mouse_pressed("Right") {
+                    entity.translate(1.0, 0.0, 0.0);
+                }
+                entity.translate(input.mouse_dx() * 0.1, input.mouse_dy() * 0.1, 0.0);
+                // An unrecognized button name should just read as not held/pressed, not error.
+                if input.is_mouse_held("NotAButton") {
+                    entity.translate(0.0, 99.0, 0.0);
+                }
+            };
+            "#,
+        );
+        world.scripts.insert(entity, ScriptList(vec![ScriptAttachment { path: script_path.clone(), enabled: true }]));
+
+        let mut runtime = test_runtime();
+        runtime.start_script(&world, entity, 0, &script_path).expect("script should start");
+
+        let mouse = MouseState::for_test(
+            (0.0, 0.0),
+            [winit::event::MouseButton::Left],
+            [winit::event::MouseButton::Right],
+            0.0,
+        );
+        assert!(runtime.update_entity(&mut world, entity, 1.0, &no_input(), &mouse, (5.0, 2.0), None).is_empty());
+
+        let position = world.transforms.get(entity).unwrap().position;
+        assert!(
+            position.abs_diff_eq(Vec3::new(1.5, 0.2, -1.0), 1e-5),
+            "expected held Left, pressed Right, and mouse delta to all apply, got {position:?}"
         );
     }
 
@@ -864,7 +989,7 @@ mod runtime_tests {
         let steps = 200;
         let dt = std::f32::consts::PI / steps as f32;
         for _ in 0..steps {
-            assert!(runtime.update_entity(&mut world, entity, dt, &input, None).is_empty());
+            assert!(runtime.update_entity(&mut world, entity, dt, &input, &no_mouse(), (0.0, 0.0), None).is_empty());
         }
 
         let rotation = world.transforms.get(entity).unwrap().rotation;
@@ -873,6 +998,64 @@ mod runtime_tests {
             rotated_x.abs_diff_eq(-Vec3::X, 1e-3),
             "expected a 180\u{b0} Y rotation to flip +X to -X, got {rotated_x:?} (rotation stalled around 90\u{b0}?)"
         );
+    }
+
+    #[test]
+    fn look_at_faces_the_target_along_local_negative_z() {
+        let mut world = World::new(test_camera());
+        let looker = world.spawn_empty("Looker", Transform { position: Vec3::new(5.0, 0.0, 0.0), ..Transform::default() });
+        let script_path = write_script(
+            "look_at.rhai",
+            r#"
+            let on_update = |dt, input| {
+                entity.look_at(0.0, 0.0, 0.0);
+            };
+            "#,
+        );
+        world.scripts.insert(looker, ScriptList(vec![ScriptAttachment { path: script_path.clone(), enabled: true }]));
+
+        let mut runtime = test_runtime();
+        runtime.start_script(&world, looker, 0, &script_path).expect("script should start");
+        assert!(runtime.update_entity(&mut world, looker, 0.1, &no_input(), &no_mouse(), (0.0, 0.0), None).is_empty());
+
+        let rotation = world.transforms.get(looker).unwrap().rotation;
+        let forward = rotation * Vec3::NEG_Z;
+        assert!(
+            forward.abs_diff_eq(Vec3::NEG_X, 1e-4),
+            "expected the entity at (5,0,0) to face back toward the origin along -X, got forward={forward:?}"
+        );
+    }
+
+    /// Regression test: `world.find(...)` reads from the [`FrameSnapshot`] `begin_frame` last
+    /// captured, but `on_start` used to be reachable (via `start_script`) *before* any
+    /// `begin_frame` call ever ran, so `world.find` inside an `on_start` hook always saw the
+    /// default-empty snapshot and returned `()` no matter what. The fix is at the call site
+    /// (`editor::EditorScene::start_play` now calls `begin_frame` before its `start_script`
+    /// loop), but the contract belongs to `ScriptRuntime` — this locks in that calling
+    /// `begin_frame` before `start_script` is sufficient for `on_start` to see other entities.
+    #[test]
+    fn on_start_can_read_other_entities_via_find_when_begin_frame_ran_first() {
+        let mut world = World::new(test_camera());
+        world.spawn_empty("Target", Transform { position: Vec3::new(3.0, 0.0, 0.0), ..Transform::default() });
+        let reader = world.spawn_empty("Reader", Transform::default());
+        let script_path = write_script(
+            "read_other_on_start.rhai",
+            r#"
+            let on_start = || {
+                // If `world.find` saw the default-empty snapshot (the bug this test guards
+                // against), `other` would be `()` and `.x` would throw here, failing this
+                // `on_start` call.
+                let other = world.find("Target");
+                let x = other.x;
+            };
+            "#,
+        );
+        world.scripts.insert(reader, ScriptList(vec![ScriptAttachment { path: script_path.clone(), enabled: true }]));
+
+        let mut runtime = test_runtime();
+        runtime.begin_frame(&world);
+
+        assert!(runtime.start_script(&world, reader, 0, &script_path).is_ok());
     }
 
     #[test]
@@ -896,7 +1079,7 @@ mod runtime_tests {
         runtime.begin_frame(&world);
 
         let input = no_input();
-        assert!(runtime.update_entity(&mut world, reader, 0.1, &input, None).is_empty());
+        assert!(runtime.update_entity(&mut world, reader, 0.1, &input, &no_mouse(), (0.0, 0.0), None).is_empty());
 
         assert_eq!(world.transforms.get(reader).unwrap().position.x, 3.0);
     }
@@ -921,7 +1104,7 @@ mod runtime_tests {
         runtime.begin_frame(&world);
 
         let input = no_input();
-        assert!(runtime.update_entity(&mut world, mover, 0.1, &input, None).is_empty());
+        assert!(runtime.update_entity(&mut world, mover, 0.1, &input, &no_mouse(), (0.0, 0.0), None).is_empty());
 
         assert_eq!(world.transforms.get(target).unwrap().position.x, 1.0);
     }
@@ -948,7 +1131,7 @@ mod runtime_tests {
         runtime.begin_frame(&world);
 
         let input = no_input();
-        assert!(runtime.update_entity(&mut world, entity, 0.1, &input, None).is_empty());
+        assert!(runtime.update_entity(&mut world, entity, 0.1, &input, &no_mouse(), (0.0, 0.0), None).is_empty());
 
         assert_eq!(world.transforms.get(entity).unwrap().position.x, 42.0);
     }
@@ -977,8 +1160,8 @@ mod runtime_tests {
         runtime.begin_frame(&world);
 
         let input = no_input();
-        assert!(runtime.update_entity(&mut world, a, 0.1, &input, None).is_empty());
-        assert!(runtime.update_entity(&mut world, b, 0.1, &input, None).is_empty());
+        assert!(runtime.update_entity(&mut world, a, 0.1, &input, &no_mouse(), (0.0, 0.0), None).is_empty());
+        assert!(runtime.update_entity(&mut world, b, 0.1, &input, &no_mouse(), (0.0, 0.0), None).is_empty());
 
         assert_eq!(world.transforms.get(a).unwrap().position.x, 10.0, "A should have moved");
         assert_eq!(
@@ -1004,7 +1187,7 @@ mod runtime_tests {
         runtime.begin_frame(&world);
 
         let input = no_input();
-        assert!(runtime.update_entity(&mut world, killer, 0.1, &input, None).is_empty());
+        assert!(runtime.update_entity(&mut world, killer, 0.1, &input, &no_mouse(), (0.0, 0.0), None).is_empty());
 
         assert!(!world.is_alive(target));
     }
@@ -1032,7 +1215,7 @@ mod runtime_tests {
         runtime.begin_frame(&world);
 
         let input = no_input();
-        assert!(runtime.update_entity(&mut world, entity, 0.1, &input, None).is_empty());
+        assert!(runtime.update_entity(&mut world, entity, 0.1, &input, &no_mouse(), (0.0, 0.0), None).is_empty());
 
         assert!(!world.is_alive(entity), "entity should be despawned");
     }
@@ -1057,7 +1240,7 @@ mod runtime_tests {
         runtime.begin_frame(&world);
 
         let input = no_input();
-        assert!(runtime.update_entity(&mut world, spawner, 0.1, &input, None).is_empty());
+        assert!(runtime.update_entity(&mut world, spawner, 0.1, &input, &no_mouse(), (0.0, 0.0), None).is_empty());
 
         let spawned = world
             .iter_entities()
@@ -1091,7 +1274,7 @@ mod runtime_tests {
         runtime.begin_frame(&world);
 
         let input = no_input();
-        assert!(runtime.update_entity(&mut world, renamer, 0.1, &input, None).is_empty());
+        assert!(runtime.update_entity(&mut world, renamer, 0.1, &input, &no_mouse(), (0.0, 0.0), None).is_empty());
 
         assert_eq!(world.names.get(renamer).unwrap().0, "New Renamer Name");
         assert_eq!(world.names.get(other).unwrap().0, "New Name");
@@ -1118,7 +1301,7 @@ mod runtime_tests {
         let input = no_input();
         // First frame: the attacher queues attach_script, which is applied (and started) during
         // this same update_entity call.
-        assert!(runtime.update_entity(&mut world, entity, 0.1, &input, None).is_empty());
+        assert!(runtime.update_entity(&mut world, entity, 0.1, &input, &no_mouse(), (0.0, 0.0), None).is_empty());
         assert_eq!(
             world.scripts.get(entity).unwrap().0.len(),
             2,
@@ -1128,7 +1311,7 @@ mod runtime_tests {
         // Second frame: the newly-attached mover script should actually run now, not just sit
         // there inert until a hypothetical Stop/Play.
         runtime.begin_frame(&world);
-        assert!(runtime.update_entity(&mut world, entity, 0.1, &input, None).is_empty());
+        assert!(runtime.update_entity(&mut world, entity, 0.1, &input, &no_mouse(), (0.0, 0.0), None).is_empty());
         assert!(
             world.transforms.get(entity).unwrap().position.x > 0.0,
             "the attached script should have moved the entity by its second frame"
@@ -1156,7 +1339,7 @@ mod runtime_tests {
         runtime.start_script(&world, entity, 0, &script_path).expect("script should start");
         runtime.begin_frame(&world);
 
-        let errors = runtime.update_entity(&mut world, entity, 0.1, &no_input(), None);
+        let errors = runtime.update_entity(&mut world, entity, 0.1, &no_input(), &no_mouse(), (0.0, 0.0), None);
         assert_eq!(errors.len(), 1, "expected one error reporting the missing renderer, got {errors:?}");
         assert!(world.renderables.get(entity).is_none(), "nothing should have been attached");
     }
@@ -1175,7 +1358,7 @@ mod runtime_tests {
         runtime.start_script(&world, entity, 0, &script_path).expect("script should start");
         runtime.begin_frame(&world);
 
-        let errors = runtime.update_entity(&mut world, entity, 0.1, &no_input(), None);
+        let errors = runtime.update_entity(&mut world, entity, 0.1, &no_input(), &no_mouse(), (0.0, 0.0), None);
         assert_eq!(errors.len(), 1, "expected one error reporting the missing renderer, got {errors:?}");
         assert!(world.renderables.get(entity).is_none(), "nothing should have been attached");
     }
@@ -1194,7 +1377,7 @@ mod runtime_tests {
         // No renderable was ever attached, so this also doubles as a no-op-if-absent check —
         // the point is that it doesn't error or panic for lack of a renderer, unlike set_sprite/
         // set_model above.
-        assert!(runtime.update_entity(&mut world, entity, 0.1, &no_input(), None).is_empty());
+        assert!(runtime.update_entity(&mut world, entity, 0.1, &no_input(), &no_mouse(), (0.0, 0.0), None).is_empty());
         assert!(world.renderables.get(entity).is_none());
     }
 }

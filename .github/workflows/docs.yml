@@ -1,0 +1,74 @@
+name: Docs
+
+on:
+  push:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment at a time; a newer push should win over an in-flight older one
+# rather than queuing behind it.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build API reference (cargo doc)
+        run: cargo doc --no-deps -p libdqg -p editor
+
+      - name: Install mdBook
+        run: cargo install --locked mdbook
+
+      - name: Build the guide (mdBook)
+        run: mdbook build docs
+
+      - name: Assemble site
+        run: |
+          set -e
+          mkdir -p site
+          cp -r docs/book/. site/
+          mkdir -p site/api
+          cp -r target/doc/. site/api/
+          cat > site/api/index.html <<'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>libDQG API reference</title>
+          </head>
+          <body>
+            <h1>libDQG API reference</h1>
+            <ul>
+              <li><a href="libdqg/index.html">libdqg</a> (the core crate)</li>
+              <li><a href="editor/index.html">editor</a></li>
+            </ul>
+          </body>
+          </html>
+          EOF
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

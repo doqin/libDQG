@@ -123,7 +123,28 @@ impl MouseState {
         self.buttons_pressed.contains(&button)
     }
 
+    pub fn buttons_held(&self) -> impl Iterator<Item = winit::event::MouseButton> + '_ {
+        self.buttons_held.iter().copied()
+    }
+
+    pub fn buttons_pressed(&self) -> impl Iterator<Item = winit::event::MouseButton> + '_ {
+        self.buttons_pressed.iter().copied()
+    }
+
     pub fn wheel_delta(&self) -> f32 {
         self.wheel_delta
+    }
+
+    /// Builds a [`MouseState`] with fixed position/held/pressed/wheel values directly, the mouse
+    /// counterpart to [`InputState::for_test`] — see its doc comment for why this exists instead
+    /// of driving one through real `winit` events.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        position: (f32, f32),
+        held: impl IntoIterator<Item = winit::event::MouseButton>,
+        pressed: impl IntoIterator<Item = winit::event::MouseButton>,
+        wheel_delta: f32,
+    ) -> Self {
+        Self { position, buttons_held: held.into_iter().collect(), buttons_pressed: pressed.into_iter().collect(), wheel_delta }
     }
 }
