@@ -16,6 +16,8 @@ Workspace layout (`Cargo.toml` at the root, resolver "3"):
 - `editor/` — an `editor` binary crate: a visual scene editor built on `libdqg` (egui-based UI,
   its own `Project` file format, mesh-accurate picking, and a `.rhai` scripting system). See
   "Editor" under Architecture below.
+- `runtime/` — a `runtime` binary crate: the standalone player a project is exported into, with no
+  egui/editor dependency. See "Export: `runtime` and `editor::export`" under Architecture below.
 
 ## Common commands
 
@@ -117,9 +119,14 @@ matrix directly.
   chosen. UI is all `egui` (`editor/src/egui_layer.rs` wraps the egui/wgpu/winit glue), drawn in
   [editor/src/ui.rs](editor/src/ui.rs): menu bar, hierarchy panel, assets panel, inspector.
 - [editor/src/project.rs](editor/src/project.rs) — `Project` is a folder on disk (`project.ron`
-  manifest, `assets/{textures,models}/`, `scenes/main.ron`, `scripts/`). `EntityRecord` is the
-  serialization boundary for an entity (name/transform/renderable/scripts); assets and scripts are
-  referenced by project-root-relative path, never by an ID/handle.
+  manifest, `assets/{textures,models}/`, `scenes/main.ron`, `scripts/`). `SceneFile`/`EntityRecord`/
+  `RenderableAsset` (the serialization boundary for an entity —
+  name/transform/renderable/scripts/camera) live in
+  [core/src/scene_file.rs](core/src/scene_file.rs), not this file, so `runtime` can deserialize the
+  same format without depending on the editor's egui/rfd stack; `project.rs` just re-exports them
+  and owns the editor-only parts (`Project::create`/`open`/`save_scene`/`import_asset`/
+  `create_script`). Assets and scripts are referenced by project-root-relative path, never by an
+  ID/handle.
 - [editor/src/picking.rs](editor/src/picking.rs) — mesh-accurate ray/triangle picking for models,
   ray/sphere for sprites, driving hover/selection highlight in `EditorScene::render`.
 - **Scripting**: entities carry a stack of `.rhai` script attachments
@@ -131,7 +138,7 @@ matrix directly.
   remembered, `editor/src/ui.rs`'s `open_script_in_editor`). See
   [editor/SCRIPTING.md](editor/SCRIPTING.md) for the user-facing API reference (what a `CLAUDE.md`
   isn't the right place for). `ScriptRuntime`
-  (also in `core/src/scripting.rs`, so a future non-editor runtime can reuse it) compiles/caches
+  (also in `core/src/scripting.rs`, reused as-is by the `runtime` player — see below) compiles/caches
   one Rhai `AST` per script path and runs each attachment's `on_start()`/`on_update(dt, input)`
   against a minimal `entity` API (`x`/`y`/`z` get-set, `translate`/`rotate`/`scale(x, y, z)`,
   `name()`) and a read-only `input` snapshot (`is_held(name)`/`is_pressed(name)`, key names
@@ -149,6 +156,32 @@ matrix directly.
   `Transform`; growing the script API past that needs a heavier restore than a transform-only
   snapshot. A script that errors repeatedly auto-disables itself and errors surface in a small
   overlay rather than crashing the editor.
+
+### Export: `runtime` and `editor::export`
+
+- [core/src/scene_file.rs](core/src/scene_file.rs) — `SceneFile`/`EntityRecord`/`RenderableAsset`/
+  `RenderableKind`/`GameManifest`, the on-disk scene/game format shared by `editor` and `runtime`.
+  `RenderableAsset::load(renderer, base_dir)` resolves stored asset paths against whatever
+  `base_dir` the caller passes — an editor `Project`'s root, or an exported game's `res/` — so
+  neither side needs its own copy of this logic.
+- [editor/src/export.rs](editor/src/export.rs) — `File > Export...` (`editor/src/ui.rs`) calls
+  `export::export_project`, which is pure file copying, not a `cargo build`: it locates a prebuilt
+  `runtime(.exe)` template next to the running editor binary (`templates/` subfolder, or flat next
+  to it — the latter is what a plain `cargo build` already provides, since every workspace binary
+  lands in the same `target/<profile>/`), copies it renamed to the project name, then mirrors the
+  project's `assets/`, `scripts/`, and `scenes/main.ron` (saved first, so unsaved edits are
+  included) under an output `res/` folder alongside a generated `res/game.ron` — wiping any
+  previous `res/` first so a removed/renamed asset doesn't linger across re-exports.
+- [runtime/src/main.rs](runtime/src/main.rs) — the export template itself: a generic binary with
+  no editor/egui dependency. At its own startup it reads `res/game.ron`/`res/scene.ron` next to its
+  exe (exe-relative, same convention as `resolve_resource_path`/`copy_res_to_output_dir`), builds a
+  `World` the same way `EditorScene::continue_load` does, and starts every enabled script
+  attachment the same way `EditorScene::start_play` does — then its `RuntimeScene::update`/`render`
+  mirror `EditorScene`'s own Play-mode per-frame loop (script updates, transform sync, active-camera
+  push, sprite/model draws), just without egui/picking/gizmos. A missing/corrupt `game.ron`/
+  `scene.ron` is a hard startup failure (`eprintln!` + exit), not a silent empty-scene fallback,
+  since `export_project` always writes both — release builds hide the console window
+  (`windows_subsystem`), debug builds keep it for that diagnostic.
 
 ### Other core modules
 

@@ -1,0 +1,8 @@
+[package]
+name = "runtime"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libdqg = { path = "../core" }
+ron = "0.8"

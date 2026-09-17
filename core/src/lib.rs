@@ -10,6 +10,7 @@ pub mod util;
 pub mod camera;
 pub mod transform;
 pub mod ecs;
+pub mod scene_file;
 pub mod scripting;
 pub mod world;
 

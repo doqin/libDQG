@@ -29,6 +29,10 @@ const LOAD_BUDGET_PER_FRAME: Duration = Duration::from_millis(8);
 /// ages out on its own, so a one-off error doesn't linger forever if the user doesn't hit Stop.
 const SCRIPT_ERROR_DISPLAY: Duration = Duration::from_secs(6);
 
+/// How long the last Export result stays in the overlay (see [`EditorScene::export_status`])
+/// before it ages out on its own.
+const EXPORT_STATUS_DISPLAY: Duration = Duration::from_secs(6);
+
 /// Whether the editor is authoring the scene or running it live. Play snapshots the whole
 /// [`World`] and starts a [`ScriptRuntime`]; Stop restores the snapshot and drops the runtime
 /// (and every script's state with it) — see [`EditorScene::start_play`]/[`stop_play`]. A
@@ -82,6 +86,10 @@ pub struct EditorScene {
     /// [`ui::draw_script_error_overlay`] — pruned by [`SCRIPT_ERROR_DISPLAY`] each frame and
     /// cleared outright on Stop.
     script_errors: Vec<(String, Instant)>,
+    /// The outcome of the last Export (see `ui::draw_export_status_overlay`), and when it was
+    /// recorded — aged out after [`EXPORT_STATUS_DISPLAY`], same shape as `script_errors` but for
+    /// one message instead of a list.
+    export_status: Option<(String, Instant)>,
     /// Editor-wide preferences (currently just the external editor "Open Script" launches),
     /// persisted next to the executable like [`RecentProjects`].
     settings: EditorSettings,
@@ -124,6 +132,7 @@ impl EditorScene {
             texture_previews: HashMap::new(),
             mode: EditorMode::Edit,
             script_errors: Vec::new(),
+            export_status: None,
             settings: EditorSettings::load(),
             renaming_script: None,
             script_rename_buffer: String::new(),
@@ -195,7 +204,7 @@ impl EditorScene {
             let Some(record) = remaining.pop_front() else { break };
             let entity = self.world.spawn_empty(record.name, record.transform);
             if let Some(asset) = record.renderable {
-                match asset.load(renderer, &project) {
+                match asset.load(renderer, &project.root) {
                     Ok(renderable) => {
                         self.world.set_renderable(entity, renderable);
                         self.entity_assets.insert(entity, asset);
@@ -335,8 +344,12 @@ impl Scene for EditorScene {
         self.last_mouse_pos = mouse_pos;
 
         self.script_errors.retain(|(_, at)| at.elapsed() < SCRIPT_ERROR_DISPLAY);
+        if self.export_status.as_ref().is_some_and(|(_, at)| at.elapsed() >= EXPORT_STATUS_DISPLAY) {
+            self.export_status = None;
+        }
         let is_playing = matches!(self.mode, EditorMode::Playing { .. });
         let script_error_messages: Vec<String> = self.script_errors.iter().map(|(message, _)| message.clone()).collect();
+        let export_status_message = self.export_status.as_ref().map(|(message, _)| message.as_str());
 
         let world = &mut self.world;
         let selected = &mut self.selected;
@@ -366,12 +379,31 @@ impl Scene for EditorScene {
                 settings,
                 renaming_script,
                 script_rename_buffer,
+                export_status_message,
                 &mut requests,
             );
         });
 
         if let Some(root) = requests.new_project.take() {
             self.queue_action(PendingAction::New(root));
+        }
+
+        if let Some(output_dir) = requests.export_project.take() {
+            if let Some(project) = self.project.as_ref() {
+                // Export packages `scenes/main.ron` off disk, not `self.world` directly — save
+                // first so unsaved edits actually make it into the exported game.
+                let result = project
+                    .save_scene(&self.world, &self.entity_assets)
+                    .and_then(|()| crate::export::export_project(project, &output_dir));
+                let message = match &result {
+                    Ok(()) => format!("Exported to {}", output_dir.display()),
+                    Err(e) => format!("Export failed: {e}"),
+                };
+                if let Err(e) = &result {
+                    eprintln!("Export failed: {e}");
+                }
+                self.export_status = Some((message, Instant::now()));
+            }
         }
 
         if let Some(root) = requests.open_project.take() {
@@ -394,7 +426,7 @@ impl Scene for EditorScene {
                     }
                     RenderableKind::Model => RenderableAsset::Model { model_path: path.clone() },
                 };
-                match probe_asset.load(renderer, project) {
+                match probe_asset.load(renderer, &project.root) {
                     Ok(renderable) => {
                         // Re-derive the sprite's width/height from the loaded texture's native
                         // size rather than trusting the placeholder above.
