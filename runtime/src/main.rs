@@ -33,18 +33,25 @@ fn res_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("res"))
 }
 
-fn load_manifest(res_dir: &Path) -> GameManifest {
-    fs::read_to_string(res_dir.join("game.ron"))
-        .ok()
-        .and_then(|text| ron::from_str(&text).ok())
-        .unwrap_or_else(|| GameManifest { title: "libDQG Game".to_string(), width: 1280, height: 720 })
+/// A missing or corrupt `game.ron`/`scene.ron` means the export itself is broken (the editor's
+/// `export::export_project` always writes both) — surfaced as a hard startup failure rather than
+/// silently falling back to defaults/an empty scene, which would ship a game that looks like it
+/// works but is missing everything.
+fn load_manifest(res_dir: &Path) -> Result<GameManifest, Box<dyn std::error::Error>> {
+    let text = fs::read_to_string(res_dir.join("game.ron"))?;
+    Ok(ron::from_str(&text)?)
 }
 
-fn load_scene_file(res_dir: &Path) -> SceneFile {
-    fs::read_to_string(res_dir.join("scene.ron"))
-        .ok()
-        .and_then(|text| ron::from_str(&text).ok())
-        .unwrap_or_default()
+fn load_scene_file(res_dir: &Path) -> Result<SceneFile, Box<dyn std::error::Error>> {
+    let text = fs::read_to_string(res_dir.join("scene.ron"))?;
+    Ok(ron::from_str(&text)?)
+}
+
+/// Prints `message` (with `path` and the error) and exits the process — the "visible diagnostic"
+/// [`load_manifest`]/[`load_scene_file`] fail loudly with instead of a silent fallback.
+fn fail_to_load(path: &Path, error: Box<dyn std::error::Error>) -> ! {
+    eprintln!("Failed to load {}: {error}", path.display());
+    std::process::exit(1);
 }
 
 /// Whether the exported scene has been loaded and its scripts started yet — deferred past the
@@ -59,12 +66,15 @@ enum RuntimeState {
 struct RuntimeScene {
     state: RuntimeState,
     res_dir: PathBuf,
-    last_mouse_pos: (f32, f32),
+    /// `None` until the first frame's mouse position is known, so that first frame reports a
+    /// zero delta instead of an artificial jump from the origin to wherever the cursor actually
+    /// starts.
+    last_mouse_pos: Option<(f32, f32)>,
 }
 
 impl RuntimeScene {
     fn new(res_dir: PathBuf) -> Self {
-        Self { state: RuntimeState::Loading, res_dir, last_mouse_pos: (0.0, 0.0) }
+        Self { state: RuntimeState::Loading, res_dir, last_mouse_pos: None }
     }
 
     /// Builds the `World` from `res/scene.ron` and starts every enabled script attachment —
@@ -72,7 +82,8 @@ impl RuntimeScene {
     /// `EditorScene::start_play` (script startup), but in one pass: there's no editor UI here
     /// that needs the load spread across frames.
     fn start(&mut self, renderer: &Renderer) {
-        let scene_file = load_scene_file(&self.res_dir);
+        let scene_path = self.res_dir.join("scene.ron");
+        let scene_file = load_scene_file(&self.res_dir).unwrap_or_else(|e| fail_to_load(&scene_path, e));
 
         let mut camera = Camera {
             position: glam::Vec3::new(0.0, 1.5, 4.0),
@@ -140,8 +151,11 @@ impl Scene for RuntimeScene {
         }
 
         let mouse_pos = mouse_state.position();
-        let mouse_delta = (mouse_pos.0 - self.last_mouse_pos.0, mouse_pos.1 - self.last_mouse_pos.1);
-        self.last_mouse_pos = mouse_pos;
+        let mouse_delta = self
+            .last_mouse_pos
+            .map(|last| (mouse_pos.0 - last.0, mouse_pos.1 - last.1))
+            .unwrap_or((0.0, 0.0));
+        self.last_mouse_pos = Some(mouse_pos);
 
         let RuntimeState::Running { world, runtime } = &mut self.state else {
             return SceneTransition::None;
@@ -177,7 +191,8 @@ impl Scene for RuntimeScene {
 
 fn main() {
     let res_dir = res_dir();
-    let manifest = load_manifest(&res_dir);
+    let manifest_path = res_dir.join("game.ron");
+    let manifest = load_manifest(&res_dir).unwrap_or_else(|e| fail_to_load(&manifest_path, e));
 
     let mut game = GameBuilder::new(Box::new(RuntimeScene::new(res_dir)))
         .title(manifest.title)

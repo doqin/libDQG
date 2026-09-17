@@ -20,6 +20,13 @@ pub fn export_project(project: &Project, output_dir: &Path) -> anyhow::Result<()
 /// a test without depending on [`find_template`]'s `env::current_exe`-based lookup.
 fn package_into(template: &Path, project: &Project, output_dir: &Path) -> anyhow::Result<()> {
     let res_dir = output_dir.join("res");
+    // Wipe any previous export's `res/` first — `fs_extra`'s `overwrite` only overwrites files
+    // that still exist in the source, so a stale asset/script removed or renamed in the project
+    // since the last export would otherwise linger here and the exported game could still load
+    // it.
+    if res_dir.is_dir() {
+        fs::remove_dir_all(&res_dir)?;
+    }
     fs::create_dir_all(&res_dir)?;
 
     let exe_name = format!("{}{}", sanitize_file_name(&project.manifest.name), env::consts::EXE_SUFFIX);
@@ -124,5 +131,32 @@ mod tests {
     fn sanitize_file_name_strips_characters_windows_disallows() {
         assert_eq!(sanitize_file_name("My:Game?"), "My_Game_");
         assert_eq!(sanitize_file_name("  "), "Game");
+    }
+
+    /// Regression test: re-exporting to the same output folder after an asset was removed from
+    /// the project must not leave that asset behind in `res/` — see [`package_into`]'s
+    /// `remove_dir_all` doc comment for why `fs_extra`'s `overwrite` alone isn't enough.
+    #[test]
+    fn package_into_removes_stale_files_from_a_previous_export() {
+        let project_root = temp_dir("project_export_repeat");
+        let project = Project::create(project_root).expect("project should be created");
+
+        fs::create_dir_all(project.textures_dir()).unwrap();
+        fs::write(project.textures_dir().join("old.png"), b"fake png bytes").unwrap();
+
+        let template = temp_dir("template_export_repeat").join("runtime.exe");
+        fs::write(&template, b"fake exe bytes").unwrap();
+
+        let output_dir = temp_dir("output_export_repeat");
+        package_into(&template, &project, &output_dir).expect("first export should succeed");
+        assert!(output_dir.join("res/assets/textures/old.png").is_file());
+
+        fs::remove_file(project.textures_dir().join("old.png")).unwrap();
+        package_into(&template, &project, &output_dir).expect("second export should succeed");
+
+        assert!(
+            !output_dir.join("res/assets/textures/old.png").exists(),
+            "an asset removed from the project should not survive a re-export to the same folder"
+        );
     }
 }

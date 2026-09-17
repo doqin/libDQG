@@ -390,7 +390,11 @@ impl Scene for EditorScene {
 
         if let Some(output_dir) = requests.export_project.take() {
             if let Some(project) = self.project.as_ref() {
-                let result = crate::export::export_project(project, &output_dir);
+                // Export packages `scenes/main.ron` off disk, not `self.world` directly — save
+                // first so unsaved edits actually make it into the exported game.
+                let result = project
+                    .save_scene(&self.world, &self.entity_assets)
+                    .and_then(|()| crate::export::export_project(project, &output_dir));
                 let message = match &result {
                     Ok(()) => format!("Exported to {}", output_dir.display()),
                     Err(e) => format!("Export failed: {e}"),

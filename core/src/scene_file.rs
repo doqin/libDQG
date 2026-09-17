@@ -54,8 +54,9 @@ impl RenderableAsset {
                     sprite.width = *width;
                     sprite.height = *height;
                 } else {
-                    // No saved/explicit size — this is the placeholder `attach_renderable`
-                    // probes with before it knows the real one.
+                    // No saved/explicit size: fall back to a unit-square fit. Covers both the
+                    // editor's `attach_renderable` probe (before it knows the real size) and any
+                    // other zero-sized `width`/`height` this shared loader is handed.
                     sprite.fit_within_unit_square();
                 }
                 Ok(Renderable::Sprite(sprite))
