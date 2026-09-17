@@ -15,6 +15,7 @@ fs_extra = "1.2"
 glob = "0.3"
 tobj = "4.0"
 rhai = { version = "1.26", features = ["internals"] }
+ron = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60", features = ["Win32_Graphics_Dwm", "Win32_Foundation"] }

@@ -881,6 +881,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
+ "fs_extra",
  "image",
  "libdqg",
  "rfd",
@@ -1787,6 +1788,7 @@ dependencies = [
  "image",
  "pollster 1.0.1",
  "rhai",
+ "ron",
  "serde",
  "tobj",
  "wgpu",
@@ -3057,6 +3059,14 @@ dependencies = [
  "bitflags 2.13.0",
  "serde",
  "serde_derive",
+]
+
+[[package]]
+name = "runtime"
+version = "0.1.0"
+dependencies = [
+ "libdqg",
+ "ron",
 ]
 
 [[package]]

@@ -26,6 +26,9 @@ pub struct UiRequests {
     /// script attachment/removal/reorder, which `ui.rs` can just apply to `world.scripts`
     /// directly since it needs no GPU load step.
     pub toggle_play: bool,
+    /// "Export..." was clicked and a destination folder chosen — building the standalone game
+    /// needs `EditorScene`'s open [`Project`], which `ui.rs` doesn't own.
+    pub export_project: Option<PathBuf>,
 }
 
 /// Top menu bar (project New/Open/Save) + bottom assets panel (collapsible; import/preview
@@ -47,6 +50,7 @@ pub fn draw(
     settings: &mut EditorSettings,
     renaming_script: &mut Option<PathBuf>,
     script_rename_buffer: &mut String,
+    export_status: Option<&str>,
     requests: &mut UiRequests,
 ) {
     draw_menu_bar(ui, project, world, entity_assets, is_playing, requests);
@@ -54,6 +58,7 @@ pub fn draw(
     draw_hierarchy(ui, world, selected, renaming, rename_buffer, entity_assets, requests);
     draw_inspector(ui, world, selected, project, entity_assets, is_playing, requests);
     draw_script_error_overlay(ui, script_errors);
+    draw_export_status_overlay(ui, export_status);
 }
 
 fn draw_menu_bar(
@@ -89,6 +94,12 @@ fn draw_menu_bar(
                             if let Err(e) = project.save_scene(world, entity_assets) {
                                 eprintln!("Failed to save project: {e}");
                             }
+                        }
+                        ui.close();
+                    }
+                    if ui.button("Export...").clicked() {
+                        if let Some(output_dir) = rfd::FileDialog::new().pick_folder() {
+                            requests.export_project = Some(output_dir);
                         }
                         ui.close();
                     }
@@ -758,6 +769,22 @@ fn draw_script_editor(ui: &mut egui::Ui, world: &mut World, entity: Entity, proj
             }
         }
     });
+}
+
+/// A small transient toast reporting the outcome of the last Export (see `EditorScene`'s
+/// `export_status`), success or failure — mirrors [`draw_script_error_overlay`]'s shape, just
+/// for one message instead of a list.
+fn draw_export_status_overlay(ui: &mut egui::Ui, export_status: Option<&str>) {
+    let Some(message) = export_status else { return };
+
+    egui::Area::new(egui::Id::new("export_status_overlay"))
+        .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-8.0, -8.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(420.0);
+                ui.label(message);
+            });
+        });
 }
 
 /// A small transient toast listing recent script compile/runtime errors (see
