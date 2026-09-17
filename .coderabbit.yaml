@@ -1,0 +1,69 @@
+# CodeRabbit configuration
+# https://docs.coderabbit.ai/reference/configuration
+
+language: en-US
+
+reviews:
+  profile: chill
+  high_level_summary: true
+
+  instructions: >
+    This repo keeps behavior described in a few places outside the code itself:
+    CLAUDE.md (architecture overview), editor/SCRIPTING.md (the Rhai scripting
+    API reference), and doc comments on public items. When a diff changes
+    something one of these describes, flag it if the description was not
+    updated alongside the code — don't just approve based on the code change
+    being correct in isolation.
+
+  path_instructions:
+    - path: "core/src/**/*.rs"
+      instructions: >
+        If this change alters a module's public API, its role in the frame
+        loop (App/SceneManager/Scene), the renderer's pipeline/draw-call
+        surface, the ECS component model, the Transformable composition
+        rules, or the scripting runtime's entity/input API, check whether
+        CLAUDE.md's "Architecture" section still accurately describes it.
+        If it doesn't, request an update to CLAUDE.md in the same PR rather
+        than deferring it. Also check that doc comments (`///`, `//!`) on the
+        changed items still match the new behavior — a doc comment that
+        describes the old behavior is worse than no comment at all.
+
+    - path: "core/src/scripting.rs"
+      instructions: >
+        Any change to the `entity`/`input` Rhai bindings (fields exposed via
+        `#[derive(CustomType)]`/`#[rhai_type(...)]`, methods registered in
+        `register_extra`, available key names, or ScriptRuntime lifecycle
+        such as the Play/Stop snapshot-restore behavior) must be reflected in
+        editor/SCRIPTING.md. Flag the PR if SCRIPTING.md's API reference,
+        examples, or caveats (e.g. the "only touches its own Transform"
+        limitation) are now stale or missing the new capability.
+
+    - path: "editor/src/**/*.rs"
+      instructions: >
+        If this changes the Project file format (project.ron, EntityRecord
+        fields, assets/scripts layout), the scripting attachment workflow, or
+        how scripts are launched/edited, check whether editor/SCRIPTING.md or
+        CLAUDE.md's "Editor" section needs a matching update.
+
+    - path: "CLAUDE.md"
+      instructions: >
+        Verify claims in this file against the current code rather than
+        taking them at face value — e.g. do the named files/line references
+        still exist and do what's described, are workspace crates and CI
+        commands still accurate. Treat mismatches as bugs in the PR, not as
+        pre-existing issues to ignore.
+
+    - path: "editor/SCRIPTING.md"
+      instructions: >
+        Verify the documented Rhai API (entity fields/methods, input
+        functions, key names, lifecycle notes) still matches
+        core/src/scripting.rs. If the PR touches scripting.rs without a
+        corresponding edit here, call that out explicitly.
+
+    - path: "**/*.rs"
+      instructions: >
+        Where a function, type, or module has a doc comment or an inline
+        comment explaining non-obvious behavior (a WHY, an invariant, a
+        workaround), check that the comment still holds true after this
+        diff. A comment describing pre-change behavior is a bug in the PR,
+        not cosmetic — call it out.
