@@ -1,0 +1,9 @@
+[book]
+title = "libDQG"
+authors = ["doqin"]
+description = "Documentation for libDQG: a personal 2D/3D game framework in Rust."
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/doqin/libDQG"
