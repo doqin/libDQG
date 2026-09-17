@@ -4,13 +4,18 @@ use libdqg::glam;
 use libdqg::renderer::Model;
 use libdqg::world::{Renderable, World};
 
+/// Fixed pick radius for a camera entity's gizmo, since it has no `Renderable` to size a bounding
+/// sphere from.
+const CAMERA_GIZMO_PICK_RADIUS: f32 = 0.3;
+
 /// Casts a ray from the camera through the mouse's normalized-device-coordinate position and
 /// returns the nearest entity it intersects, if any.
 ///
 /// `Model` entities are tested against their actual mesh triangles (ray/triangle intersection
 /// against each mesh's local-space geometry, transformed into world space), so picking follows
 /// the model's real silhouette rather than a loose bounding volume. `Sprite` entities still use a
-/// bounding-sphere test, since a sprite is already just a flat quad.
+/// bounding-sphere test, since a sprite is already just a flat quad. Camera entities (no
+/// `Renderable` at all) use a fixed-radius bounding-sphere test around their gizmo instead.
 pub fn pick(world: &World, camera: &Camera, ndc_x: f32, ndc_y: f32) -> Option<Entity> {
     let inv_view_proj = camera.build_view_projection_matrix().inverse();
 
@@ -38,6 +43,15 @@ pub fn pick(world: &World, camera: &Camera, ndc_x: f32, ndc_y: f32) -> Option<En
         };
 
         if let Some(t) = hit_t {
+            if best.is_none_or(|(_, best_t)| t < best_t) {
+                best = Some((entity, t));
+            }
+        }
+    }
+
+    for (entity, _) in world.cameras.iter() {
+        let Some(transform) = world.transforms.get(entity) else { continue };
+        if let Some(t) = ray_sphere_intersection(ray_origin, ray_dir, transform.position, CAMERA_GIZMO_PICK_RADIUS) {
             if best.is_none_or(|(_, best_t)| t < best_t) {
                 best = Some((entity, t));
             }
@@ -114,4 +128,22 @@ fn ray_sphere_intersection(origin: glam::Vec3, dir: glam::Vec3, center: glam::Ve
     }
     let t = -b - discriminant.sqrt();
     Some(t.max(0.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libdqg::world::{CameraComponent, Transform};
+
+    #[test]
+    fn pick_hits_a_camera_entity_via_its_bounding_sphere() {
+        let mut camera = Camera { position: glam::Vec3::new(0.0, 0.0, 5.0), yaw: 0.0, pitch: 0.0, aspect: 1.0, fov: 45.0, znear: 0.1, zfar: 100.0 };
+        camera.look_at(glam::Vec3::ZERO);
+        let mut world = World::new(camera);
+        let entity = world.spawn_empty("Cam", Transform::default());
+        world.set_camera(entity, CameraComponent::default());
+
+        assert_eq!(pick(&world, &camera, 0.0, 0.0), Some(entity));
+        assert_eq!(pick(&world, &camera, 0.99, 0.99), None);
+    }
 }

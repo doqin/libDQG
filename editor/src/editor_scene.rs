@@ -10,7 +10,7 @@ use libdqg::renderer::{DrawPass, Renderer};
 use libdqg::scene::{Scene, SceneTransition};
 use libdqg::scripting::{ScriptError, ScriptList, ScriptRuntime};
 use libdqg::types::Color;
-use libdqg::world::{Renderable, World};
+use libdqg::world::{CameraComponent, Renderable, Transform, World};
 
 use crate::editor_settings::EditorSettings;
 use crate::egui_layer::EguiLayer;
@@ -95,15 +95,16 @@ pub struct EditorScene {
 impl EditorScene {
     /// Builds a scene that will create or open `action`'s project root on its first `update`.
     pub fn opening(action: PendingAction) -> Self {
-        let camera = Camera {
-            eye: glam::Vec3::new(0.0, 1.5, 4.0),
-            target: glam::Vec3::ZERO,
-            up: glam::Vec3::Y,
+        let mut camera = Camera {
+            position: glam::Vec3::new(0.0, 1.5, 4.0),
+            yaw: 0.0,
+            pitch: 0.0,
             aspect: 1.0,
             fov: 45.0,
             znear: 0.1,
             zfar: 100.0,
         };
+        camera.look_at(glam::Vec3::ZERO);
 
         Self {
             world: World::new(camera),
@@ -205,6 +206,9 @@ impl EditorScene {
             if !record.scripts.is_empty() {
                 self.world.scripts.insert(entity, ScriptList(record.scripts));
             }
+            if let Some(component) = record.camera {
+                self.world.set_camera(entity, component);
+            }
         }
 
         if remaining.is_empty() {
@@ -222,6 +226,11 @@ impl EditorScene {
 
         let world_snapshot = self.world.clone();
         let mut runtime = ScriptRuntime::new(project.root.clone());
+        // Without this, `world.find(...)` inside an `on_start` hook would see nothing but a
+        // default-empty snapshot (only populated per-frame from here on, right before
+        // `update_entity`) and always return `()` — `on_start` gets the same start-of-Play
+        // snapshot guarantee `on_update` already has for cross-entity reads.
+        runtime.begin_frame(&self.world);
 
         for entity in self.world.iter_entities().collect::<Vec<_>>() {
             let Some(list) = self.world.scripts.get(entity) else { continue };
@@ -256,6 +265,43 @@ impl EditorScene {
 
 fn format_script_error(error: &ScriptError) -> String {
     format!("{}: {}", error.script.display(), error.message)
+}
+
+/// Fixed visual size for a camera entity's frustum gizmo, in world units — deliberately not
+/// derived from the component's real `znear`/`zfar` (which can be arbitrarily large), since the
+/// gizmo is an at-a-glance orientation indicator, not a literal clip-volume outline.
+const CAMERA_GIZMO_DISTANCE: f32 = 0.6;
+/// Placeholder aspect ratio for the gizmo's proportions — `CameraComponent` doesn't store aspect
+/// (it's viewport-derived, only meaningful once Play assigns a real camera), so the gizmo just
+/// assumes a common 16:9 shape.
+const CAMERA_GIZMO_ASPECT: f32 = 16.0 / 9.0;
+
+/// Draws an 8-line wireframe pyramid (eye to 4 far-plane corners, plus the far rectangle)
+/// representing `component`'s frustum at `transform`, projected through `view_camera` (the
+/// camera currently driving the viewport).
+fn draw_camera_gizmo(pass: &mut DrawPass, view_camera: &Camera, transform: &Transform, component: &CameraComponent, color: Color) {
+    let forward = transform.rotation * glam::Vec3::NEG_Z;
+    let up = transform.rotation * glam::Vec3::Y;
+    let right = transform.rotation * glam::Vec3::X;
+
+    let half_height = (component.fov.to_radians() * 0.5).tan() * CAMERA_GIZMO_DISTANCE;
+    let half_width = half_height * CAMERA_GIZMO_ASPECT;
+
+    let eye = transform.position;
+    let far_center = eye + forward * CAMERA_GIZMO_DISTANCE;
+    let corners = [
+        far_center + up * half_height + right * half_width,
+        far_center + up * half_height - right * half_width,
+        far_center - up * half_height - right * half_width,
+        far_center - up * half_height + right * half_width,
+    ];
+
+    for corner in corners {
+        pass.draw_world_line(view_camera, eye, corner, 1.5, color);
+    }
+    for i in 0..4 {
+        pass.draw_world_line(view_camera, corners[i], corners[(i + 1) % 4], 1.5, color);
+    }
 }
 
 impl Scene for EditorScene {
@@ -392,7 +438,7 @@ impl Scene for EditorScene {
                 self.hovered = None;
                 runtime.begin_frame(&self.world);
                 for entity in self.world.iter_entities().collect::<Vec<_>>() {
-                    for error in runtime.update_entity(&mut self.world, entity, delta_time, input_state, Some(&*renderer)) {
+                    for error in runtime.update_entity(&mut self.world, entity, delta_time, input_state, mouse_state, mouse_delta, Some(&*renderer)) {
                         self.script_errors.push((format_script_error(&error), Instant::now()));
                     }
                 }
@@ -401,8 +447,15 @@ impl Scene for EditorScene {
 
         self.world.sync_transforms();
         let size = renderer.size();
-        self.world.camera.aspect = size.width as f32 / (size.height.max(1) as f32);
-        *renderer.camera_mut() = self.world.camera;
+        let aspect = size.width as f32 / (size.height.max(1) as f32);
+        self.world.camera.aspect = aspect;
+
+        let push_camera = if is_playing {
+            self.world.active_camera(aspect).unwrap_or(self.world.camera)
+        } else {
+            self.world.camera
+        };
+        *renderer.camera_mut() = push_camera;
 
         SceneTransition::None
     }
@@ -434,6 +487,18 @@ impl Scene for EditorScene {
                         pass.draw_model_outline(model);
                     }
                 }
+            }
+        }
+
+        if matches!(self.mode, EditorMode::Edit) {
+            for (entity, component) in self.world.cameras.iter() {
+                let Some(transform) = self.world.transforms.get(entity) else { continue };
+                let color = if self.selected == Some(entity) {
+                    Color::new(0.3, 0.7, 1.0, 1.0)
+                } else {
+                    Color::new(0.6, 0.6, 0.6, 1.0)
+                };
+                draw_camera_gizmo(pass, &self.world.camera, transform, component, color);
             }
         }
     }

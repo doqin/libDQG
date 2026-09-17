@@ -811,6 +811,32 @@ impl DrawPass<'_> {
         self.upload_and_draw(&verts);
     }
 
+    /// A line between two world-space points, projected through `camera`. Unlike `draw_model`/
+    /// `draw_world_sprite`, not depth-tested — for editor-only gizmos that should always draw on
+    /// top. No-ops if an endpoint is behind the camera (`w <= 0`) rather than drawing a
+    /// folded-back bogus line.
+    pub fn draw_world_line(&mut self, camera: &crate::camera::Camera, p0: glam::Vec3, p1: glam::Vec3, thickness: f32, color: Color) {
+        let view_proj = camera.build_view_projection_matrix();
+        let (Some(a), Some(b)) = (
+            Self::project_to_screen(view_proj, p0, self.screen_w, self.screen_h),
+            Self::project_to_screen(view_proj, p1, self.screen_w, self.screen_h),
+        ) else {
+            return;
+        };
+        self.draw_line(a.0, a.1, b.0, b.1, thickness, color);
+    }
+
+    fn project_to_screen(view_proj: glam::Mat4, point: glam::Vec3, screen_w: u32, screen_h: u32) -> Option<(f32, f32)> {
+        let clip = view_proj * point.extend(1.0);
+        if clip.w <= 1e-4 {
+            return None;
+        }
+        let ndc = clip.truncate() / clip.w;
+        let w = screen_w.max(1) as f32;
+        let h = screen_h.max(1) as f32;
+        Some(((ndc.x * 0.5 + 0.5) * w, (1.0 - (ndc.y * 0.5 + 0.5)) * h))
+    }
+
     fn to_clip(&self, x: f32, y: f32) -> [f32; 2] {
         let w = (self.screen_w.max(1)) as f32;
         let h = (self.screen_h.max(1)) as f32;

@@ -11,6 +11,7 @@
                 model_path: "assets\\models\\cube.obj",
             )),
             scripts: [],
+            camera: None,
         ),
         (
             name: "kako_cube_2",
@@ -23,6 +24,7 @@
                 model_path: "assets\\models\\cube.obj",
             )),
             scripts: [],
+            camera: None,
         ),
         (
             name: "kako_sprite",
@@ -37,6 +39,7 @@
                 height: 1.0,
             )),
             scripts: [],
+            camera: None,
         ),
         (
             name: "marx",
@@ -51,6 +54,7 @@
                 height: 0.5625,
             )),
             scripts: [],
+            camera: None,
         ),
         (
             name: "player",
@@ -84,6 +88,7 @@
                     enabled: true,
                 ),
             ],
+            camera: None,
         ),
         (
             name: "kako_ball_copy_1",
@@ -96,6 +101,7 @@
                 model_path: "assets\\models\\kakoball.obj",
             )),
             scripts: [],
+            camera: None,
         ),
         (
             name: "kako_ball_copy_2",
@@ -108,6 +114,28 @@
                 model_path: "assets\\models\\kakoball.obj",
             )),
             scripts: [],
+            camera: None,
+        ),
+        (
+            name: "Camera",
+            transform: (
+                position: (0.0, 2.2, 9.4),
+                rotation: (-0.0784591, 0.0, 0.0, 0.9969173),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            renderable: None,
+            scripts: [
+                (
+                    path: "scripts\\follow_player.rhai",
+                    enabled: true,
+                ),
+            ],
+            camera: Some((
+                fov: 45.0,
+                znear: 0.1,
+                zfar: 100.0,
+                active: true,
+            )),
         ),
     ],
 )

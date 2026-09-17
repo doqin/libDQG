@@ -137,15 +137,16 @@ impl<'a> Renderer<'a> {
 
         let sprite_pipeline = extras::create_sprite_pipeline(&device, config.format, &texture_bind_group_layout);
 
-        let camera = Camera {
-            eye: glam::Vec3::new(0.0, 1.0, 2.0),
-            target: glam::Vec3::new(0.0, 0.0, 0.0),
-            up: glam::Vec3::new(0.0, 1.0, 0.0),
+        let mut camera = Camera {
+            position: glam::Vec3::new(0.0, 1.0, 2.0),
+            yaw: 0.0,
+            pitch: 0.0,
             aspect: config.width as f32 / config.height as f32,
             fov: 45.0,
             znear: 0.1,
             zfar: 100.0,
         };
+        camera.look_at(glam::Vec3::ZERO);
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update(&camera);
 

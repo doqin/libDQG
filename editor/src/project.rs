@@ -6,7 +6,7 @@ use std::sync::Arc;
 use libdqg::ecs::Entity;
 use libdqg::renderer::{Model, Renderer, Sprite, Texture};
 use libdqg::scripting::ScriptAttachment;
-use libdqg::world::{Renderable, Transform, World};
+use libdqg::world::{CameraComponent, Renderable, Transform, World};
 
 pub const MANIFEST_FILE: &str = "project.ron";
 const SCENE_FILE: &str = "scenes/main.ron";
@@ -54,6 +54,8 @@ pub struct EntityRecord {
     pub renderable: Option<RenderableAsset>,
     #[serde(default)]
     pub scripts: Vec<ScriptAttachment>,
+    #[serde(default)]
+    pub camera: Option<CameraComponent>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -179,6 +181,7 @@ impl Project {
                 transform: *world.transforms.get(entity).unwrap(),
                 renderable: assets.get(&entity).cloned(),
                 scripts: world.scripts.get(entity).map(|list| list.0.clone()).unwrap_or_default(),
+                camera: world.cameras.get(entity).copied(),
             })
             .collect();
 

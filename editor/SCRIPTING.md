@@ -52,7 +52,7 @@ the next.
 `on_update`'s parameters:
 - `dt` — the time in seconds since the last frame (a small number, typically around `0.016` at 60
   FPS). Multiply speeds by `dt` so movement is frame-rate independent.
-- `input` — the current keyboard state. See [The `input` object](#the-input-object).
+- `input` — the current keyboard and mouse state. See [The `input` object](#the-input-object).
 
 ## The `entity` object
 
@@ -66,6 +66,7 @@ of members, whether it's your own entity or one you looked up.
 | `entity.x`, `entity.y`, `entity.z` | Get or set the entity's position directly, one axis at a time. |
 | `entity.translate(x, y, z)` | Moves the entity by this amount (adds to its current position). |
 | `entity.rotate(x, y, z)` | Rotates the entity by this amount, in **radians**, around each axis. This is a *delta* — it turns the entity further from wherever it currently is, it doesn't set an absolute angle. |
+| `entity.look_at(x, y, z)` | Points the entity at the given world position, down its local -Z axis. Unlike `rotate`, this **sets** the rotation outright rather than adding to it — call it every frame to keep facing a moving point (like a player). This is the axis a camera entity's `CameraComponent` looks down too, so it doubles as "point this camera at (x, y, z)". |
 | `entity.scale(x, y, z)` | Multiplies the entity's current scale by this amount. `entity.scale(2.0, 2.0, 2.0)` doubles its size; `entity.scale(1.0, 1.0, 1.0)` leaves it unchanged. |
 | `entity.name()` | Returns the entity's name (the one shown in the Hierarchy panel), as text. |
 | `entity.set_name(name)` | Renames the entity. |
@@ -85,9 +86,8 @@ let on_update = |dt, input| {
 
 A note on rotation: `rotate` composes with whatever rotation the entity already has, the same way
 turning a steering wheel further turns the car further, rather than snapping it to face a
-specific direction. If you want to face a specific direction, you'll need to work that out
-yourself from repeated `rotate` calls (there's currently no "set absolute rotation" — this may be
-added later if it turns out to be needed).
+specific direction. If you want to face a specific point outright — a moving target, most often —
+use `look_at` instead; see the table above.
 
 A note on `set_sprite`/`set_model`: unlike the other `entity` methods, these read a file from disk
 and upload it to the GPU — the same cost as clicking **Attach Sprite**/**Attach Model** in the
@@ -133,8 +133,8 @@ A couple of things worth knowing about `world.find(...)`:
 
 ## The `input` object
 
-`input` (`on_update`'s second parameter) tells you what's happening with the keyboard **this
-frame**:
+`input` (`on_update`'s second parameter) tells you what's happening with the keyboard and mouse
+**this frame**:
 
 | Method | True when... |
 |---|---|
@@ -158,8 +158,8 @@ consistent across keyboard layouts. This mostly (not always — the Windows/Cmd 
 `"SuperLeft"`/`"SuperRight"` here rather than the web's `"MetaLeft"`/`"MetaRight"`) resembles a web
 browser's `KeyboardEvent.code` naming, if you want a mental model — for the exact, definitive list
 of every supported name, see the `KeyCode` enum in
-[`core/src/types.rs`](../core/src/types.rs). A misspelled or unrecognized name is simply never
-held/pressed, it won't cause an error.
+[`core/src/types.rs`](https://github.com/doqin/libDQG/blob/master/core/src/types.rs). A
+misspelled or unrecognized name is simply never held/pressed, it won't cause an error.
 
 ```rhai
 let on_update = |dt, input| {
@@ -168,6 +168,28 @@ let on_update = |dt, input| {
     }
     if input.is_pressed("Space") {
         entity.translate(0.0, 1.0, 0.0);   // hop, once per press
+    }
+};
+```
+
+### Mouse
+
+| Method | Description |
+|---|---|
+| `input.is_mouse_held(name)` | true while the given mouse button is held down. |
+| `input.is_mouse_pressed(name)` | true for exactly one frame, the moment the button goes down. |
+| `input.mouse_x()`, `input.mouse_y()` | the cursor's current position, in window pixels (top-left origin). |
+| `input.mouse_dx()`, `input.mouse_dy()` | how far the cursor moved since last frame — the usual building block for mouse-look. |
+| `input.mouse_wheel()` | scroll wheel movement this frame (positive is up/away from you). Zero most frames. |
+
+`name` for the mouse buttons is one of `"Left"`, `"Right"`, `"Middle"`, `"Back"`, `"Forward"` — same
+quiet-on-typo behavior as keyboard names.
+
+```rhai
+let on_update = |dt, input| {
+    // Mouse-look while the right button is held, like an orbit/fly camera.
+    if input.is_mouse_held("Right") {
+        entity.rotate(0.0, input.mouse_dx() * 0.002, 0.0);
     }
 };
 ```

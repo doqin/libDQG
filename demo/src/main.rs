@@ -128,11 +128,10 @@ impl Scene for MyScene {
             self.camera_controller.handle_key(code);
         }
         if let Some(renderer) = renderer {
-            let camera = renderer.camera_mut();
             if let Some(sprite) = &self.sample_sprite {
-                camera.target = sprite.transform().transform_point3(glam::Vec3::ZERO);
+                self.camera_controller.set_target(sprite.transform().transform_point3(glam::Vec3::ZERO));
             }
-            self.camera_controller.update_camera(delta_time, camera);
+            self.camera_controller.update_camera(delta_time, renderer.camera_mut());
         }
         SceneTransition::None
     }

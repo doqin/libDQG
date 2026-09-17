@@ -8,6 +8,9 @@ use libdqg::types::KeyCode;
 pub struct FlyCamera {
     yaw: f32,
     pitch: f32,
+    /// Orbit pivot. `Camera` itself only stores position + yaw/pitch, not a target, so this has
+    /// to live here instead.
+    target: glam::Vec3,
     distance: f32,
     move_speed: f32,
     look_speed: f32,
@@ -19,6 +22,7 @@ impl FlyCamera {
         Self {
             yaw: -90.0_f32.to_radians(),
             pitch: -20.0_f32.to_radians(),
+            target: glam::Vec3::ZERO,
             distance,
             move_speed: 4.0,
             look_speed: 0.005,
@@ -34,11 +38,9 @@ impl FlyCamera {
 
         self.distance = (self.distance - mouse.wheel_delta() * self.zoom_speed).max(0.5);
 
-        let forward = glam::Vec3::new(
-            self.yaw.cos() * self.pitch.cos(),
-            self.pitch.sin(),
-            self.yaw.sin() * self.pitch.cos(),
-        ).normalize();
+        camera.yaw = self.yaw;
+        camera.pitch = self.pitch;
+        let forward = camera.forward();
         let right = forward.cross(glam::Vec3::Y).normalize();
 
         let mut move_delta = glam::Vec3::ZERO;
@@ -55,9 +57,9 @@ impl FlyCamera {
             move_delta += right;
         }
         if move_delta != glam::Vec3::ZERO {
-            camera.target += move_delta.normalize() * self.move_speed * delta_time;
+            self.target += move_delta.normalize() * self.move_speed * delta_time;
         }
 
-        camera.eye = camera.target - forward * self.distance;
+        camera.position = self.target - forward * self.distance;
     }
 }
