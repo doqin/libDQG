@@ -1,0 +1,49 @@
+(
+    entities: [
+        (
+            name: "Camera 1",
+            transform: (
+                position: (0.0, 0.0, 5.55),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            renderable: None,
+            scripts: [],
+            camera: Some((
+                fov: 45.0,
+                znear: 0.1,
+                zfar: 100.0,
+                active: true,
+            )),
+        ),
+        (
+            name: "kako_cube",
+            transform: (
+                position: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            renderable: Some(Model(
+                model_path: "assets/models/cube.obj",
+            )),
+            scripts: [],
+            camera: None,
+        ),
+        (
+            name: "world_entity",
+            transform: (
+                position: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            renderable: None,
+            scripts: [
+                (
+                    path: "scripts/change_scene.rhai",
+                    enabled: true,
+                ),
+            ],
+            camera: None,
+        ),
+    ],
+)

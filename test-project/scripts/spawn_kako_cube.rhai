@@ -11,6 +11,7 @@ let on_start = || {
 let on_update = |dt, input| {
     if input.is_pressed("KeyF") {
         let kako_cube = world.spawn_entity("spawned_kako_cube_" + spawned_entity_names.len().to_string(), entity.x, entity.y, entity.z);
+        kako_cube.set_persistent(true);
         kako_cube.set_model("assets/models/cube.obj");
         kako_cube.attach_script("scripts/spin.rhai");
         spawned_entity_names.push(kako_cube.name());

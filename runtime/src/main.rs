@@ -20,7 +20,7 @@ use libdqg::input::{InputState, MouseState};
 use libdqg::renderer::{DrawPass, Renderer};
 use libdqg::scene::{Scene, SceneTransition};
 use libdqg::scene_file::{GameManifest, SceneFile};
-use libdqg::scripting::{ScriptList, ScriptRuntime};
+use libdqg::scripting::ScriptRuntime;
 use libdqg::world::{Renderable, World};
 
 /// An exported game's data directory: `res/` next to its own executable, mirroring the
@@ -33,23 +33,17 @@ fn res_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("res"))
 }
 
-/// A missing or corrupt `game.ron`/`scene.ron` means the export itself is broken (the editor's
+/// A missing or corrupt `game.ron`/scene file means the export itself is broken (the editor's
 /// `export::export_project` always writes both) — surfaced as a hard startup failure rather than
 /// silently falling back to defaults/an empty scene, which would ship a game that looks like it
 /// works but is missing everything.
-fn load_manifest(res_dir: &Path) -> Result<GameManifest, Box<dyn std::error::Error>> {
-    let text = fs::read_to_string(res_dir.join("game.ron"))?;
-    Ok(ron::from_str(&text)?)
-}
-
-fn load_scene_file(res_dir: &Path) -> Result<SceneFile, Box<dyn std::error::Error>> {
-    let text = fs::read_to_string(res_dir.join("scene.ron"))?;
-    Ok(ron::from_str(&text)?)
+fn load_manifest(res_dir: &Path) -> anyhow::Result<GameManifest> {
+    Ok(ron::from_str(&fs::read_to_string(res_dir.join("game.ron"))?)?)
 }
 
 /// Prints `message` (with `path` and the error) and exits the process — the "visible diagnostic"
-/// [`load_manifest`]/[`load_scene_file`] fail loudly with instead of a silent fallback.
-fn fail_to_load(path: &Path, error: Box<dyn std::error::Error>) -> ! {
+/// [`load_manifest`]/[`SceneFile::load`] fail loudly with instead of a silent fallback.
+fn fail_to_load(path: &Path, error: anyhow::Error) -> ! {
     eprintln!("Failed to load {}: {error}", path.display());
     std::process::exit(1);
 }
@@ -66,6 +60,9 @@ enum RuntimeState {
 struct RuntimeScene {
     state: RuntimeState,
     res_dir: PathBuf,
+    /// Project-relative path (from `GameManifest::start_scene`) to the scene this game boots
+    /// into.
+    start_scene: PathBuf,
     /// `None` until the first frame's mouse position is known, so that first frame reports a
     /// zero delta instead of an artificial jump from the origin to wherever the cursor actually
     /// starts.
@@ -73,17 +70,19 @@ struct RuntimeScene {
 }
 
 impl RuntimeScene {
-    fn new(res_dir: PathBuf) -> Self {
-        Self { state: RuntimeState::Loading, res_dir, last_mouse_pos: None }
+    fn new(res_dir: PathBuf, start_scene: PathBuf) -> Self {
+        Self { state: RuntimeState::Loading, res_dir, start_scene, last_mouse_pos: None }
     }
 
-    /// Builds the `World` from `res/scene.ron` and starts every enabled script attachment —
+    /// Builds the `World` from the start scene and starts every enabled script attachment —
     /// mirrors the editor's `EditorScene::continue_load` (entity spawn sequence) followed by
     /// `EditorScene::start_play` (script startup), but in one pass: there's no editor UI here
-    /// that needs the load spread across frames.
+    /// that needs the load spread across frames. Uses the same `EntityRecord::spawn_into`/
+    /// `ScriptRuntime::start_all_scripts` helpers a script-triggered `scene.change(...)` uses
+    /// mid-game, so initial boot and a later scene change behave identically.
     fn start(&mut self, renderer: &Renderer) {
-        let scene_path = self.res_dir.join("scene.ron");
-        let scene_file = load_scene_file(&self.res_dir).unwrap_or_else(|e| fail_to_load(&scene_path, e));
+        let scene_path = self.res_dir.join(&self.start_scene);
+        let scene_file = SceneFile::load(&scene_path).unwrap_or_else(|e| fail_to_load(&scene_path, e));
 
         let mut camera = Camera {
             position: glam::Vec3::new(0.0, 1.5, 4.0),
@@ -98,38 +97,13 @@ impl RuntimeScene {
         let mut world = World::new(camera);
 
         for record in scene_file.entities {
-            let entity = world.spawn_empty(record.name, record.transform);
-            if let Some(asset) = record.renderable {
-                match asset.load(renderer, &self.res_dir) {
-                    Ok(renderable) => world.set_renderable(entity, renderable),
-                    Err(e) => eprintln!("Failed to load renderable: {e}"),
-                }
-            }
-            if !record.scripts.is_empty() {
-                world.scripts.insert(entity, ScriptList(record.scripts));
-            }
-            if let Some(component) = record.camera {
-                world.set_camera(entity, component);
-            }
+            record.spawn_into(&mut world, Some(renderer), &self.res_dir);
         }
 
         let mut runtime = ScriptRuntime::new(self.res_dir.clone());
         runtime.begin_frame(&world);
-        for entity in world.iter_entities().collect::<Vec<_>>() {
-            let Some(list) = world.scripts.get(entity) else { continue };
-            let starts: Vec<(usize, PathBuf)> = list
-                .0
-                .iter()
-                .enumerate()
-                .filter(|(_, attachment)| attachment.enabled)
-                .map(|(index, attachment)| (index, self.res_dir.join(&attachment.path)))
-                .collect();
-
-            for (index, script_path) in starts {
-                if let Err(e) = runtime.start_script(&world, entity, index, &script_path) {
-                    eprintln!("Script error ({}): {}", e.script.display(), e.message);
-                }
-            }
+        for error in runtime.start_all_scripts(&mut world, &self.res_dir, Some(renderer)) {
+            eprintln!("Script error ({}): {}", error.script.display(), error.message);
         }
 
         self.state = RuntimeState::Running { world, runtime };
@@ -193,8 +167,9 @@ fn main() {
     let res_dir = res_dir();
     let manifest_path = res_dir.join("game.ron");
     let manifest = load_manifest(&res_dir).unwrap_or_else(|e| fail_to_load(&manifest_path, e));
+    let start_scene = manifest.start_scene.clone();
 
-    let mut game = GameBuilder::new(Box::new(RuntimeScene::new(res_dir)))
+    let mut game = GameBuilder::new(Box::new(RuntimeScene::new(res_dir, start_scene)))
         .title(manifest.title)
         .size(manifest.width, manifest.height)
         .build();

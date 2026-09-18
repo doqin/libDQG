@@ -29,6 +29,35 @@ pub struct UiRequests {
     /// "Export..." was clicked and a destination folder chosen — building the standalone game
     /// needs `EditorScene`'s open [`Project`], which `ui.rs` doesn't own.
     pub export_project: Option<PathBuf>,
+    /// A scene tile in the Assets panel's Scenes section was double-clicked, or a tab in the
+    /// scene tab strip was clicked — `EditorScene`'s own `switch_or_open_scene` method needs to
+    /// run (it owns every open tab's `World`/`project`), same reason `toggle_play`/
+    /// `export_project` are requests instead of handled here directly.
+    pub switch_scene: Option<PathBuf>,
+    /// A tab's close button was clicked — `EditorScene`'s own `close_scene_tab` needs to run (it
+    /// owns the tab list and has to autosave before dropping one).
+    pub close_scene_tab: Option<PathBuf>,
+    /// A scene tile's inline rename was committed (`(old_path, new_stem)`) — needs `EditorScene`'s
+    /// help since renaming may also need to update `ProjectManifest.start_scene` and any open
+    /// tab's identity, neither of which `ui.rs` owns.
+    pub rename_scene: Option<(PathBuf, String)>,
+    /// A script tile's inline rename was committed (`(old_path, new_stem)`) — deferred to
+    /// `EditorScene::rename_script`, which fixes up every open tab's `World` and every scene file
+    /// on disk that references the old path, not just whichever `World` happens to be active —
+    /// `ui.rs` only ever sees one `World` at a time.
+    pub rename_script: Option<(PathBuf, String)>,
+    /// A scene tile's "Set as Start Scene" context-menu item was clicked — needs `&mut Project` to
+    /// persist `ProjectManifest.start_scene`, which `ui.rs` only ever sees as `&Project`.
+    pub set_start_scene: Option<PathBuf>,
+    /// Something in the active tab's `World`/entity-asset map was mutated this frame — set by
+    /// every editing widget below (transform drag, hierarchy add/rename/duplicate/delete, camera/
+    /// renderable/script editing) so `EditorScene::update` can mark that tab dirty. Not raised for
+    /// `attach_renderable`, which is itself a request `EditorScene` marks dirty when it applies it.
+    pub edited: bool,
+    /// "Save" was clicked — deferred to `EditorScene` (rather than saved directly here, unlike
+    /// before tabs existed) because `ui.rs` doesn't own the dirty flag it needs to clear on
+    /// success.
+    pub save_scene: bool,
 }
 
 /// Top menu bar (project New/Open/Save) + bottom assets panel (collapsible; import/preview
@@ -50,25 +79,63 @@ pub fn draw(
     settings: &mut EditorSettings,
     renaming_script: &mut Option<PathBuf>,
     script_rename_buffer: &mut String,
+    renaming_scene: &mut Option<PathBuf>,
+    scene_rename_buffer: &mut String,
     export_status: Option<&str>,
+    current_scene: &Path,
+    current_scene_dirty: bool,
+    open_scenes: &[(PathBuf, bool)],
+    active_scene: usize,
     requests: &mut UiRequests,
 ) {
-    draw_menu_bar(ui, project, world, entity_assets, is_playing, requests);
-    draw_assets_panel(ui, project, assets_expanded, texture_previews, world, settings, renaming_script, script_rename_buffer);
+    draw_menu_bar(ui, project, is_playing, current_scene_dirty, requests);
+    draw_scene_tabs(ui, open_scenes, active_scene, requests);
+    draw_assets_panel(
+        ui,
+        project,
+        assets_expanded,
+        texture_previews,
+        settings,
+        renaming_script,
+        script_rename_buffer,
+        renaming_scene,
+        scene_rename_buffer,
+        current_scene,
+        requests,
+    );
     draw_hierarchy(ui, world, selected, renaming, rename_buffer, entity_assets, requests);
     draw_inspector(ui, world, selected, project, entity_assets, is_playing, requests);
     draw_script_error_overlay(ui, script_errors);
     draw_export_status_overlay(ui, export_status);
 }
 
-fn draw_menu_bar(
-    ui: &mut egui::Ui,
-    project: Option<&Project>,
-    world: &World,
-    entity_assets: &HashMap<Entity, RenderableAsset>,
-    is_playing: bool,
-    requests: &mut UiRequests,
-) {
+/// Tab strip for the project's open scenes (`EditorScene::open_scenes`), one tab per scene kept
+/// loaded in memory — clicking a tab switches to it instantly (no reload: unlike the old
+/// single-scene behavior, an opened scene stays fully loaded until its tab is closed). Each tab's
+/// `bool` marks it dirty (unsaved edits — see `EditorScene::OpenScene::dirty`), shown as a
+/// trailing `*` on its label. The close button ("x") removes a tab (autosaving it first, handled
+/// by `EditorScene::close_scene_tab`), except when it's the only one open — closing while Playing
+/// (if it's the active tab) stops Play first, same as switching does, so no separate disabled
+/// state is needed here.
+fn draw_scene_tabs(ui: &mut egui::Ui, open_scenes: &[(PathBuf, bool)], active_scene: usize, requests: &mut UiRequests) {
+    egui::Panel::top("scene_tabs_panel").show(ui, |ui| {
+        ui.horizontal(|ui| {
+            for (index, (path, dirty)) in open_scenes.iter().enumerate() {
+                let is_active = index == active_scene;
+                let label = if *dirty { format!("{} *", asset_file_name(path)) } else { asset_file_name(path) };
+                if ui.selectable_label(is_active, label).clicked() && !is_active {
+                    requests.switch_scene = Some(path.clone());
+                }
+                if open_scenes.len() > 1 && ui.small_button("x").clicked() {
+                    requests.close_scene_tab = Some(path.clone());
+                }
+                ui.separator();
+            }
+        });
+    });
+}
+
+fn draw_menu_bar(ui: &mut egui::Ui, project: Option<&Project>, is_playing: bool, current_scene_dirty: bool, requests: &mut UiRequests) {
     egui::Panel::top("menu_bar_panel").show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.menu_button("File", |ui| {
@@ -90,11 +157,7 @@ fn draw_menu_bar(
                 // the scene file instead.
                 ui.add_enabled_ui(project.is_some() && !is_playing, |ui| {
                     if ui.button("Save").clicked() {
-                        if let Some(project) = project {
-                            if let Err(e) = project.save_scene(world, entity_assets) {
-                                eprintln!("Failed to save project: {e}");
-                            }
-                        }
+                        requests.save_scene = true;
                         ui.close();
                     }
                     if ui.button("Export...").clicked() {
@@ -115,7 +178,8 @@ fn draw_menu_bar(
             });
 
             if let Some(project) = project {
-                ui.label(format!("Project: {}", project.manifest.name));
+                let dirty_marker = if current_scene_dirty { " *" } else { "" };
+                ui.label(format!("Project: {}{dirty_marker}", project.manifest.name));
             }
         });
     });
@@ -140,6 +204,7 @@ fn draw_hierarchy(
                 let entity = world.spawn_empty(name, Transform::default());
                 *selected = Some(entity);
                 *renaming = None;
+                requests.edited = true;
                 ui.close();
             }
             if ui.button("Camera").clicked() {
@@ -148,6 +213,7 @@ fn draw_hierarchy(
                 world.set_camera(entity, CameraComponent::default());
                 *selected = Some(entity);
                 *renaming = None;
+                requests.edited = true;
                 ui.close();
             }
         });
@@ -169,6 +235,7 @@ fn draw_hierarchy(
                         name.0 = rename_buffer.clone();
                     }
                     *renaming = None;
+                    requests.edited = true;
                 } else {
                     response.request_focus();
                 }
@@ -203,6 +270,7 @@ fn draw_hierarchy(
                         if let Some(component) = world.cameras.get(entity).copied() {
                             world.set_camera(new_entity, component);
                         }
+                        requests.edited = true;
                     }
                     ui.close();
                 }
@@ -216,6 +284,7 @@ fn draw_hierarchy(
         if let Some(entity) = despawn_requested {
             world.despawn(entity);
             entity_assets.remove(&entity);
+            requests.edited = true;
             if *selected == Some(entity) {
                 *selected = None;
             }
@@ -231,10 +300,13 @@ fn draw_assets_panel(
     project: Option<&Project>,
     assets_expanded: &mut bool,
     texture_previews: &mut HashMap<PathBuf, egui::TextureHandle>,
-    world: &mut World,
     settings: &mut EditorSettings,
     renaming_script: &mut Option<PathBuf>,
     script_rename_buffer: &mut String,
+    renaming_scene: &mut Option<PathBuf>,
+    scene_rename_buffer: &mut String,
+    current_scene: &Path,
+    requests: &mut UiRequests,
 ) {
     egui::Panel::bottom("assets_panel").show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -263,7 +335,9 @@ fn draw_assets_panel(
                 ui.separator();
                 draw_model_group(ui, project);
                 ui.separator();
-                draw_script_group(ui, project, world, settings, renaming_script, script_rename_buffer);
+                draw_script_group(ui, project, settings, renaming_script, script_rename_buffer, requests);
+                ui.separator();
+                draw_scene_group(ui, project, current_scene, renaming_scene, scene_rename_buffer, requests);
             });
         });
     });
@@ -294,10 +368,10 @@ fn draw_model_group(ui: &mut egui::Ui, project: &Project) {
 fn draw_script_group(
     ui: &mut egui::Ui,
     project: &Project,
-    world: &mut World,
     settings: &mut EditorSettings,
     renaming_script: &mut Option<PathBuf>,
     script_rename_buffer: &mut String,
+    requests: &mut UiRequests,
 ) {
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
@@ -312,9 +386,112 @@ fn draw_script_group(
         });
         ui.horizontal_wrapped(|ui| {
             for path in project.list_scripts() {
-                draw_script_tile(ui, project, &path, world, settings, renaming_script, script_rename_buffer);
+                draw_script_tile(ui, project, &path, settings, renaming_script, script_rename_buffer, requests);
             }
         });
+    });
+}
+
+/// Mirrors [`draw_script_group`]'s shape: a project can hold several scene `.ron` files (see
+/// `Project::list_scenes`), listed here with a way to create new ones from scratch (a scene, like
+/// a script, has nothing to import from outside the project) and switch which one is currently
+/// open for editing.
+fn draw_scene_group(
+    ui: &mut egui::Ui,
+    project: &Project,
+    current_scene: &Path,
+    renaming_scene: &mut Option<PathBuf>,
+    scene_rename_buffer: &mut String,
+    requests: &mut UiRequests,
+) {
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            ui.label("Scenes");
+            if ui.small_button("New Scene").clicked() {
+                if let Err(e) = project.create_scene() {
+                    eprintln!("Failed to create scene: {e}");
+                }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            for path in project.list_scenes() {
+                draw_scene_tile(ui, &path, current_scene, &project.manifest.start_scene, renaming_scene, scene_rename_buffer, requests);
+            }
+        });
+    });
+}
+
+/// One tile: a placeholder icon (see `draw_model_tile`'s doc comment — no cheap thumbnail for a
+/// scene either), highlighted if it's the scene currently open for editing and starred if it's
+/// the project's start scene. Double-click switches to it (opening a new tab if it isn't already
+/// open — see `EditorScene::switch_or_open_scene` — or just activating its existing tab, no
+/// reload, if it is); the context menu offers Rename (inline, like the Scripts section's) and
+/// "Set as Start Scene". Renaming only touches the file on disk, `ProjectManifest.start_scene`,
+/// and any open tab's identity — unlike a `ScriptAttachment` path (structured ECS data
+/// `rename_script` can fix up everywhere it's referenced), a `scene.change("path")` call is a
+/// free-text string literal inside `.rhai` source that can't be auto-fixed, so a renamed scene's
+/// incoming `scene.change(...)` calls (if any) are left dangling and need updating by hand.
+fn draw_scene_tile(
+    ui: &mut egui::Ui,
+    path: &Path,
+    current_scene: &Path,
+    start_scene: &Path,
+    renaming_scene: &mut Option<PathBuf>,
+    scene_rename_buffer: &mut String,
+    requests: &mut UiRequests,
+) {
+    ui.vertical(|ui| {
+        ui.set_width(ASSET_PREVIEW_SIZE);
+
+        if renaming_scene.as_deref() == Some(path) {
+            let response = ui.text_edit_singleline(scene_rename_buffer);
+            if response.lost_focus() {
+                requests.rename_scene = Some((path.to_path_buf(), scene_rename_buffer.clone()));
+                *renaming_scene = None;
+            } else {
+                response.request_focus();
+            }
+            return;
+        }
+
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(ASSET_PREVIEW_SIZE, ASSET_PREVIEW_SIZE), egui::Sense::click());
+        let is_open = path == current_scene;
+        let fill = if is_open { egui::Color32::from_gray(80) } else { egui::Color32::from_gray(55) };
+        ui.painter().rect_filled(rect, 4.0, fill);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "RON",
+            egui::FontId::proportional(12.0),
+            egui::Color32::from_gray(200),
+        );
+        if path == start_scene {
+            ui.painter().text(
+                rect.right_top(),
+                egui::Align2::RIGHT_TOP,
+                "*",
+                egui::FontId::proportional(14.0),
+                egui::Color32::YELLOW,
+            );
+        }
+
+        if response.double_clicked() {
+            requests.switch_scene = Some(path.to_path_buf());
+        }
+        response.context_menu(|ui| {
+            if ui.button("Rename").clicked() {
+                *renaming_scene = Some(path.to_path_buf());
+                *scene_rename_buffer = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                ui.close();
+            }
+            if ui.button("Set as Start Scene").clicked() {
+                requests.set_start_scene = Some(path.to_path_buf());
+                ui.close();
+            }
+        });
+
+        ui.add(egui::Label::new(asset_file_name(path)).wrap());
     });
 }
 
@@ -405,10 +582,10 @@ fn draw_script_tile(
     ui: &mut egui::Ui,
     project: &Project,
     path: &Path,
-    world: &mut World,
     settings: &mut EditorSettings,
     renaming_script: &mut Option<PathBuf>,
     script_rename_buffer: &mut String,
+    requests: &mut UiRequests,
 ) {
     ui.vertical(|ui| {
         ui.set_width(ASSET_PREVIEW_SIZE);
@@ -416,7 +593,12 @@ fn draw_script_tile(
         if renaming_script.as_deref() == Some(path) {
             let response = ui.text_edit_singleline(script_rename_buffer);
             if response.lost_focus() {
-                rename_script(project, world, path, script_rename_buffer);
+                // Deferred to `EditorScene::rename_script`, not handled here like the old
+                // single-scene version of this rename was — a `ScriptAttachment` can be
+                // referenced by entities in *any* scene file, not just whichever one is the
+                // active tab's `World`, so fixing it up needs `Project`/every open tab together,
+                // neither of which `ui.rs` owns.
+                requests.rename_script = Some((path.to_path_buf(), script_rename_buffer.clone()));
                 *renaming_script = None;
             } else {
                 response.request_focus();
@@ -457,44 +639,6 @@ fn draw_script_tile(
 
         ui.add(egui::Label::new(asset_file_name(path)).wrap());
     });
-}
-
-/// Renames `old_path` (project-relative) to `new_stem` in place on disk, keeping its extension,
-/// then fixes up every [`ScriptAttachment`] anywhere in `world` that referenced the old path —
-/// otherwise every entity that had this script attached would silently start pointing at a file
-/// that no longer exists. Refuses (and reports, rather than silently overwriting) if something
-/// is already using the target name.
-fn rename_script(project: &Project, world: &mut World, old_path: &Path, new_stem: &str) {
-    let new_stem = new_stem.trim();
-    if new_stem.is_empty() {
-        return;
-    }
-
-    let extension = old_path.extension().map(|ext| ext.to_string_lossy().into_owned()).unwrap_or_default();
-    let new_path = old_path.with_file_name(format!("{new_stem}.{extension}"));
-    if new_path == old_path {
-        return;
-    }
-
-    let old_absolute = project.root.join(old_path);
-    let new_absolute = project.root.join(&new_path);
-    if new_absolute.exists() {
-        eprintln!("Failed to rename script: {} already exists", new_path.display());
-        return;
-    }
-
-    if let Err(e) = std::fs::rename(&old_absolute, &new_absolute) {
-        eprintln!("Failed to rename script: {e}");
-        return;
-    }
-
-    for (_, list) in world.scripts.iter_mut() {
-        for attachment in list.0.iter_mut() {
-            if attachment.path == old_path {
-                attachment.path = new_path.clone();
-            }
-        }
-    }
 }
 
 /// Opens `path` (project-relative) in [`EditorSettings::preferred_editor`], prompting for one
@@ -552,25 +696,26 @@ fn draw_inspector(
         // Editing a Transform in the Inspector while a script is writing to the same entity
         // every frame would visibly fight with it, so disable the numeric fields during Play.
         ui.add_enabled_ui(!is_playing, |ui| {
-            draw_transform_editor(ui, world, entity);
+            draw_transform_editor(ui, world, entity, requests);
         });
         ui.separator();
-        draw_camera_editor(ui, world, entity);
+        draw_camera_editor(ui, world, entity, requests);
         ui.separator();
         draw_renderable_editor(ui, world, entity, project, entity_assets, requests);
         ui.separator();
-        draw_script_editor(ui, world, entity, project);
+        draw_script_editor(ui, world, entity, project, requests);
     });
 }
 
-fn draw_transform_editor(ui: &mut egui::Ui, world: &mut World, entity: Entity) {
+fn draw_transform_editor(ui: &mut egui::Ui, world: &mut World, entity: Entity, requests: &mut UiRequests) {
     let Some(transform) = world.transforms.get_mut(entity) else { return };
+    let mut edited = false;
 
     ui.label("Position");
     ui.horizontal(|ui| {
-        ui.add(egui::DragValue::new(&mut transform.position.x).speed(0.05).prefix("x: "));
-        ui.add(egui::DragValue::new(&mut transform.position.y).speed(0.05).prefix("y: "));
-        ui.add(egui::DragValue::new(&mut transform.position.z).speed(0.05).prefix("z: "));
+        edited |= ui.add(egui::DragValue::new(&mut transform.position.x).speed(0.05).prefix("x: ")).changed();
+        edited |= ui.add(egui::DragValue::new(&mut transform.position.y).speed(0.05).prefix("y: ")).changed();
+        edited |= ui.add(egui::DragValue::new(&mut transform.position.z).speed(0.05).prefix("z: ")).changed();
     });
 
     let (mut yaw, mut pitch, mut roll) = transform.rotation.to_euler(glam::EulerRot::YXZ);
@@ -592,20 +737,26 @@ fn draw_transform_editor(ui: &mut egui::Ui, world: &mut World, entity: Entity) {
             roll.to_radians(),
         );
     }
+    edited |= changed;
 
     ui.label("Scale");
     ui.horizontal(|ui| {
-        ui.add(egui::DragValue::new(&mut transform.scale.x).speed(0.05).prefix("x: "));
-        ui.add(egui::DragValue::new(&mut transform.scale.y).speed(0.05).prefix("y: "));
-        ui.add(egui::DragValue::new(&mut transform.scale.z).speed(0.05).prefix("z: "));
+        edited |= ui.add(egui::DragValue::new(&mut transform.scale.x).speed(0.05).prefix("x: ")).changed();
+        edited |= ui.add(egui::DragValue::new(&mut transform.scale.y).speed(0.05).prefix("y: ")).changed();
+        edited |= ui.add(egui::DragValue::new(&mut transform.scale.z).speed(0.05).prefix("z: ")).changed();
     });
+
+    if edited {
+        requests.edited = true;
+    }
 }
 
 /// The selected entity's camera lens, if it has one: a checkbox to attach/detach a
 /// [`CameraComponent`] (mirrors `draw_renderable_editor`'s Remove button), then FOV/near/far
-/// fields and an "Active Camera" checkbox once attached. No `UiRequests` indirection is needed
-/// here, unlike attaching a `Renderable` — nothing here loads a GPU resource.
-fn draw_camera_editor(ui: &mut egui::Ui, world: &mut World, entity: Entity) {
+/// fields and an "Active Camera" checkbox once attached. No GPU-load `UiRequests` indirection is
+/// needed here like `draw_renderable_editor`'s attach flow — `requests` is only used to flag
+/// `edited`.
+fn draw_camera_editor(ui: &mut egui::Ui, world: &mut World, entity: Entity, requests: &mut UiRequests) {
     let mut enabled = world.cameras.get(entity).is_some();
     if ui.checkbox(&mut enabled, "Camera").changed() {
         if enabled {
@@ -613,6 +764,7 @@ fn draw_camera_editor(ui: &mut egui::Ui, world: &mut World, entity: Entity) {
         } else {
             world.clear_camera(entity);
         }
+        requests.edited = true;
     }
     if !enabled {
         return;
@@ -620,17 +772,22 @@ fn draw_camera_editor(ui: &mut egui::Ui, world: &mut World, entity: Entity) {
 
     let mut activate: Option<bool> = None;
     if let Some(component) = world.cameras.get_mut(entity) {
+        let mut edited = false;
         ui.horizontal(|ui| {
-            ui.add(egui::DragValue::new(&mut component.fov).speed(0.5).prefix("FOV: ").range(1.0..=179.0));
+            edited |= ui.add(egui::DragValue::new(&mut component.fov).speed(0.5).prefix("FOV: ").range(1.0..=179.0)).changed();
         });
         ui.horizontal(|ui| {
-            ui.add(egui::DragValue::new(&mut component.znear).speed(0.01).prefix("Near: "));
-            ui.add(egui::DragValue::new(&mut component.zfar).speed(0.5).prefix("Far: "));
+            edited |= ui.add(egui::DragValue::new(&mut component.znear).speed(0.01).prefix("Near: ")).changed();
+            edited |= ui.add(egui::DragValue::new(&mut component.zfar).speed(0.5).prefix("Far: ")).changed();
         });
 
         let mut active = component.active;
         if ui.checkbox(&mut active, "Active Camera (used in Play)").changed() {
             activate = Some(active);
+            edited = true;
+        }
+        if edited {
+            requests.edited = true;
         }
     }
 
@@ -674,6 +831,7 @@ fn draw_renderable_editor(
         if ui.button("Remove").clicked() {
             world.clear_renderable(entity);
             entity_assets.remove(&entity);
+            requests.edited = true;
             return;
         }
         ui.label("Change to:");
@@ -704,8 +862,8 @@ fn draw_renderable_editor(
 /// attached (execution order top-to-bottom), plus a picker to attach more from the project's
 /// `scripts/` folder. Unlike [`draw_renderable_editor`], attaching/detaching/reordering needs no
 /// GPU load step, so this mutates `world.scripts` directly rather than going through
-/// [`UiRequests`].
-fn draw_script_editor(ui: &mut egui::Ui, world: &mut World, entity: Entity, project: Option<&Project>) {
+/// [`UiRequests`] (beyond flagging `edited`).
+fn draw_script_editor(ui: &mut egui::Ui, world: &mut World, entity: Entity, project: Option<&Project>, requests: &mut UiRequests) {
     ui.label("Scripts");
 
     let mut move_up: Option<usize> = None;
@@ -716,7 +874,9 @@ fn draw_script_editor(ui: &mut egui::Ui, world: &mut World, entity: Entity, proj
         let last = list.0.len().saturating_sub(1);
         for (index, attachment) in list.0.iter_mut().enumerate() {
             ui.horizontal(|ui| {
-                ui.checkbox(&mut attachment.enabled, "");
+                if ui.checkbox(&mut attachment.enabled, "").changed() {
+                    requests.edited = true;
+                }
                 ui.label(asset_file_name(&attachment.path));
                 // Plain text rather than up/down arrow glyphs — egui's default font doesn't
                 // cover those and renders a tofu box instead.
@@ -740,12 +900,15 @@ fn draw_script_editor(ui: &mut egui::Ui, world: &mut World, entity: Entity, proj
     if let Some(list) = world.scripts.get_mut(entity) {
         if let Some(index) = move_up.filter(|&i| i > 0) {
             list.0.swap(index, index - 1);
+            requests.edited = true;
         }
         if let Some(index) = move_down.filter(|&i| i + 1 < list.0.len()) {
             list.0.swap(index, index + 1);
+            requests.edited = true;
         }
         if let Some(index) = remove {
             list.0.remove(index);
+            requests.edited = true;
         }
     }
 
@@ -766,6 +929,7 @@ fn draw_script_editor(ui: &mut egui::Ui, world: &mut World, entity: Entity, proj
                     Some(list) => list.0.push(attachment),
                     None => world.scripts.insert(entity, ScriptList(vec![attachment])),
                 }
+                requests.edited = true;
             }
         }
     });
