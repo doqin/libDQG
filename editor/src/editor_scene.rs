@@ -418,6 +418,14 @@ impl EditorScene {
     /// (as an earlier, single-scene version of this did) would silently leave every other scene's
     /// reference pointing at a file that no longer exists. Refuses (and reports, rather than
     /// silently overwriting) if something is already using the target name.
+    ///
+    /// Copies rather than renames the file up front, deleting the original only once every scene
+    /// has been migrated (or confirmed not to reference it) — a scene file that fails to load or
+    /// save partway through this (corrupt on disk, a failed write, ...) is rare but not
+    /// impossible, and with a plain rename that failure would leave that scene's attachment
+    /// pointing at a file that's already gone. Copying first means both names stay valid on disk
+    /// for the duration, so a partial failure just leaves some scenes referencing the old name
+    /// and some the new one — both of which still resolve — rather than a dangling reference.
     fn rename_script(&mut self, old_path: PathBuf, new_stem: String) {
         let new_stem = new_stem.trim();
         if new_stem.is_empty() {
@@ -429,7 +437,7 @@ impl EditorScene {
             return;
         }
 
-        {
+        let old_absolute = {
             let Some(project) = self.project.as_ref() else { return };
             let old_absolute = project.root.join(&old_path);
             let new_absolute = project.root.join(&new_path);
@@ -437,14 +445,19 @@ impl EditorScene {
                 eprintln!("Failed to rename script: {} already exists", new_path.display());
                 return;
             }
-            if let Err(e) = std::fs::rename(&old_absolute, &new_absolute) {
+            if let Err(e) = std::fs::copy(&old_absolute, &new_absolute) {
                 eprintln!("Failed to rename script: {e}");
                 return;
             }
-        }
+            old_absolute
+        };
+
+        let mut all_migrated = true;
 
         // Every open tab's live World — marking a tab dirty only if it actually referenced the
-        // renamed script, so this doesn't spuriously flag unrelated tabs as unsaved.
+        // renamed script, so this doesn't spuriously flag unrelated tabs as unsaved. In-memory
+        // updates can't fail the way a disk load/save below can, so these always count as
+        // migrated (the tab's own Save/autosave path is what persists this afterward).
         let open_paths: HashSet<PathBuf> = self.open_scenes.iter().map(|scene| scene.path.clone()).collect();
         for scene in self.open_scenes.iter_mut() {
             let mut changed = false;
@@ -463,32 +476,49 @@ impl EditorScene {
 
         // Every other scene file on disk — anything already covered above via an open tab is
         // skipped here, since that in-memory copy is the current source of truth until it's saved.
-        let Some(project) = self.project.as_ref() else { return };
-        for scene_path in project.list_scenes() {
-            if open_paths.contains(&scene_path) {
-                continue;
-            }
-            let mut scene_file = match project.load_scene(&scene_path) {
-                Ok(scene_file) => scene_file,
-                Err(e) => {
-                    eprintln!("Failed to check {} for script references: {e}", scene_path.display());
+        if let Some(project) = self.project.as_ref() {
+            for scene_path in project.list_scenes() {
+                if open_paths.contains(&scene_path) {
                     continue;
                 }
-            };
-            let mut changed = false;
-            for record in scene_file.entities.iter_mut() {
-                for attachment in record.scripts.iter_mut() {
-                    if attachment.path == old_path {
-                        attachment.path = new_path.clone();
-                        changed = true;
+                let mut scene_file = match project.load_scene(&scene_path) {
+                    Ok(scene_file) => scene_file,
+                    Err(e) => {
+                        eprintln!("Failed to check {} for script references: {e}", scene_path.display());
+                        all_migrated = false;
+                        continue;
+                    }
+                };
+                let mut changed = false;
+                for record in scene_file.entities.iter_mut() {
+                    for attachment in record.scripts.iter_mut() {
+                        if attachment.path == old_path {
+                            attachment.path = new_path.clone();
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    if let Err(e) = scene_file.save(&project.root.join(&scene_path)) {
+                        eprintln!("Failed to update script reference in {}: {e}", scene_path.display());
+                        all_migrated = false;
                     }
                 }
             }
-            if changed {
-                if let Err(e) = scene_file.save(&project.root.join(&scene_path)) {
-                    eprintln!("Failed to update script reference in {}: {e}", scene_path.display());
-                }
+        }
+
+        if all_migrated {
+            if let Err(e) = std::fs::remove_file(&old_absolute) {
+                eprintln!("Renamed script to {}, but failed to remove the old file: {e}", new_path.display());
             }
+        } else {
+            eprintln!(
+                "Some scenes still reference {} — left it alongside {} on disk until they're fixed up \
+                 (open the affected scene and re-save, or reattach {})",
+                old_path.display(),
+                new_path.display(),
+                new_path.display()
+            );
         }
     }
 
