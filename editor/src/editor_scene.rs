@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use libdqg::camera::Camera;
@@ -8,7 +8,7 @@ use libdqg::glam;
 use libdqg::input::{InputState, MouseState};
 use libdqg::renderer::{DrawPass, Renderer};
 use libdqg::scene::{Scene, SceneTransition};
-use libdqg::scripting::{ScriptError, ScriptList, ScriptRuntime};
+use libdqg::scripting::{ScriptError, ScriptRuntime};
 use libdqg::types::Color;
 use libdqg::world::{CameraComponent, Renderable, Transform, World};
 
@@ -38,7 +38,9 @@ const EXPORT_STATUS_DISPLAY: Duration = Duration::from_secs(6);
 /// (and every script's state with it) — see [`EditorScene::start_play`]/[`stop_play`]. A
 /// whole-`World` snapshot (not just `Transform`) is what makes scripts that spawn/despawn/rename
 /// entities or attach scripts fully revert on Stop, the same way a Transform-only snapshot
-/// already made translate/rotate/scale revert.
+/// already made translate/rotate/scale revert. Always targets whichever tab was active when Play
+/// started — see [`EditorScene::switch_or_open_scene`]/[`close_scene_tab`] for why switching or
+/// closing tabs stops Play first.
 enum EditorMode {
     Edit,
     Playing { world_snapshot: World, runtime: ScriptRuntime },
@@ -52,34 +54,139 @@ pub enum PendingAction {
     Open(PathBuf),
 }
 
-/// Where a project load currently stands, so it can be spread across several frames instead of
-/// blocking the main thread for its whole duration.
+/// Where a load currently stands, so it can be spread across several frames instead of blocking
+/// the main thread for its whole duration.
 enum LoadState {
     /// Requested but not started; the project itself hasn't been created/opened yet.
     Pending(PendingAction),
-    /// The project is resolved and its scene's entities are queued; `remaining` is drained a
-    /// few at a time (see [`LOAD_BUDGET_PER_FRAME`]) each frame until empty.
-    LoadingAssets { project: Project, remaining: VecDeque<EntityRecord>, total: usize },
+    /// A New/Open Project action resolved into `project`; `remaining` entities for its start
+    /// scene (if any) are drained a few at a time (see [`LOAD_BUDGET_PER_FRAME`]) into `world`/
+    /// `entity_assets` each frame until empty, at which point this *replaces* `open_scenes`
+    /// wholesale — a different project's tabs aren't valid to keep around.
+    LoadingProject {
+        project: Project,
+        path: PathBuf,
+        world: World,
+        entity_assets: HashMap<Entity, RenderableAsset>,
+        remaining: VecDeque<EntityRecord>,
+        total: usize,
+    },
+    /// An additional scene in the *current* project is being opened as a new tab; `remaining` is
+    /// drained the same way, then the finished [`OpenScene`] is appended to `open_scenes` and
+    /// made active — every other already-open tab is left untouched throughout.
+    LoadingScene {
+        path: PathBuf,
+        world: World,
+        entity_assets: HashMap<Entity, RenderableAsset>,
+        remaining: VecDeque<EntityRecord>,
+        total: usize,
+    },
+}
+
+/// Spawns up to [`LOAD_BUDGET_PER_FRAME`] worth of `remaining` entities into `world`/
+/// `entity_assets`, returning `true` once `remaining` is empty (the load is finished) — shared by
+/// the "New/Open Project" and "open an additional scene as a new tab" load paths.
+fn spawn_budgeted(
+    world: &mut World,
+    entity_assets: &mut HashMap<Entity, RenderableAsset>,
+    remaining: &mut VecDeque<EntityRecord>,
+    renderer: &Renderer,
+    project_root: &Path,
+) -> bool {
+    let deadline = Instant::now() + LOAD_BUDGET_PER_FRAME;
+    while Instant::now() < deadline {
+        let Some(record) = remaining.pop_front() else { break };
+        let (entity, asset) = record.spawn_into(world, Some(renderer), project_root);
+        if let Some(asset) = asset {
+            entity_assets.insert(entity, asset);
+        }
+    }
+    remaining.is_empty()
+}
+
+/// One open scene tab: its own `World`, entity-asset tracking, hierarchy/inspector selection
+/// state, and viewport camera — everything that used to be a single set of fields directly on
+/// `EditorScene` before a project could have more than one scene open for editing at once. Kept
+/// fully loaded in memory for as long as its tab stays open (see `EditorScene::open_scenes`),
+/// unlike the old single-scene design, which discarded and reloaded a scene's `World` from disk
+/// on every switch.
+struct OpenScene {
+    /// Project-relative path, e.g. `"scenes/main.ron"` — this tab's identity; a scene can only be
+    /// open in one tab at a time (see `EditorScene::switch_or_open_scene`).
+    path: PathBuf,
+    world: World,
+    entity_assets: HashMap<Entity, RenderableAsset>,
+    selected: Option<Entity>,
+    /// The entity currently under the mouse cursor in the 3D viewport, if any. Recomputed every
+    /// frame this tab is active (unlike `selected`, which only changes on click) so the hovered
+    /// model can blink.
+    hovered: Option<Entity>,
+    renaming: Option<Entity>,
+    rename_buffer: String,
+    /// This tab's own viewport camera controller — kept per-tab (rather than shared) so switching
+    /// tabs doesn't disturb whatever framing you last left each scene at.
+    fly_camera: FlyCamera,
+    /// Whether this tab has edits not yet written to disk — set whenever the UI mutates its
+    /// `world`/`entity_assets` (see `ui::UiRequests::edited`), cleared by a successful Save/
+    /// Export/tab-close autosave. Surfaced as a `*` on its tab (see `ui::draw_scene_tabs`) and
+    /// drives the pre-Play "unsaved changes" prompt (see `EditorScene::play_confirmation`):
+    /// `scene.change(...)` reads a scene's `.ron` straight off disk (see
+    /// `libdqg::scripting`'s `WorldCommand::ChangeScene`), so a dirty *other* open tab would
+    /// otherwise be silently stale to a script that jumps to it mid-Play, even though its real,
+    /// unsaved contents are fully visible on screen right now.
+    dirty: bool,
+}
+
+impl OpenScene {
+    fn new(path: PathBuf, world: World, entity_assets: HashMap<Entity, RenderableAsset>) -> Self {
+        Self {
+            path,
+            world,
+            entity_assets,
+            selected: None,
+            hovered: None,
+            renaming: None,
+            rename_buffer: String::new(),
+            fly_camera: FlyCamera::new(6.0),
+            dirty: false,
+        }
+    }
+}
+
+/// The starting viewport camera every fresh [`World`] gets — extracted so [`EditorScene::opening`]
+/// and [`EditorScene::start_load`] (which each build a brand new `World`) don't duplicate it.
+fn default_camera() -> Camera {
+    let mut camera = Camera {
+        position: glam::Vec3::new(0.0, 1.5, 4.0),
+        yaw: 0.0,
+        pitch: 0.0,
+        aspect: 1.0,
+        fov: 45.0,
+        znear: 0.1,
+        zfar: 100.0,
+    };
+    camera.look_at(glam::Vec3::ZERO);
+    camera
 }
 
 pub struct EditorScene {
-    world: World,
-    selected: Option<Entity>,
-    /// The entity currently under the mouse cursor in the 3D viewport, if any. Recomputed every
-    /// frame (unlike `selected`, which only changes on click) so the hovered model can blink.
-    hovered: Option<Entity>,
-    /// Elapsed time accumulator driving the hover blink, in seconds.
+    /// Every scene currently open for editing — always has at least one entry (a blank
+    /// placeholder before any project is opened, same as the editor's old always-present single
+    /// `World`), so [`Self::active_scene`] is always a valid index into it.
+    open_scenes: Vec<OpenScene>,
+    active_scene: usize,
+    /// Elapsed time accumulator driving the hover blink, shared across tabs since it's a plain
+    /// animation clock, not per-scene state.
     hover_blink_time: f32,
-    renaming: Option<Entity>,
-    rename_buffer: String,
     project: Option<Project>,
-    entity_assets: HashMap<Entity, RenderableAsset>,
-    fly_camera: FlyCamera,
     last_mouse_pos: (f32, f32),
     recent: RecentProjects,
     load: Option<LoadState>,
     egui: EguiLayer,
     assets_expanded: bool,
+    /// Cached texture thumbnails for the Assets panel, keyed by project-relative path — global
+    /// rather than per-tab since it's a decode cache for the project's `assets/` folder, not
+    /// scene-specific state; cleared only when a different project is opened.
     texture_previews: HashMap<PathBuf, egui::TextureHandle>,
     mode: EditorMode,
     /// Recent script compile/runtime errors and when each was recorded, for the overlay in
@@ -98,32 +205,25 @@ pub struct EditorScene {
     /// of an [`Entity`] since scripts aren't ECS entities.
     renaming_script: Option<PathBuf>,
     script_rename_buffer: String,
+    /// Mirrors `renaming_script`/`script_rename_buffer`, for a scene tile in the Assets panel's
+    /// Scenes section.
+    renaming_scene: Option<PathBuf>,
+    scene_rename_buffer: String,
+    /// `Some(dirty tab paths)` while the pre-Play "unsaved changes" dialog (see
+    /// [`draw_play_confirmation`]) is up, blocking the rest of `update` until resolved — set when
+    /// Play is requested while any tab is dirty, cleared once the user picks Save & Play, Play
+    /// Without Saving, or Cancel.
+    play_confirmation: Option<Vec<PathBuf>>,
 }
 
 impl EditorScene {
     /// Builds a scene that will create or open `action`'s project root on its first `update`.
     pub fn opening(action: PendingAction) -> Self {
-        let mut camera = Camera {
-            position: glam::Vec3::new(0.0, 1.5, 4.0),
-            yaw: 0.0,
-            pitch: 0.0,
-            aspect: 1.0,
-            fov: 45.0,
-            znear: 0.1,
-            zfar: 100.0,
-        };
-        camera.look_at(glam::Vec3::ZERO);
-
         Self {
-            world: World::new(camera),
-            selected: None,
-            hovered: None,
+            open_scenes: vec![OpenScene::new(PathBuf::new(), World::new(default_camera()), HashMap::new())],
+            active_scene: 0,
             hover_blink_time: 0.0,
-            renaming: None,
-            rename_buffer: String::new(),
             project: None,
-            entity_assets: HashMap::new(),
-            fly_camera: FlyCamera::new(6.0),
             last_mouse_pos: (0.0, 0.0),
             recent: RecentProjects::load(),
             load: Some(LoadState::Pending(action)),
@@ -136,6 +236,9 @@ impl EditorScene {
             settings: EditorSettings::load(),
             renaming_script: None,
             script_rename_buffer: String::new(),
+            renaming_scene: None,
+            scene_rename_buffer: String::new(),
+            play_confirmation: None,
         }
     }
 
@@ -145,9 +248,11 @@ impl EditorScene {
     }
 
     /// Resolves `action` into an open [`Project`] (fast: just filesystem/manifest/scene-file
-    /// work, no asset decoding), replacing the current world with an empty one and queuing the
-    /// saved scene's entities — if any — to be loaded incrementally afterward. Records the
-    /// project in the recent-projects list.
+    /// work, no asset decoding), replacing every currently open tab with the project's start
+    /// scene and queuing its entities — if any — to be loaded incrementally afterward. Records
+    /// the project in the recent-projects list. A different project's tabs are meaningless once
+    /// the project changes, so unlike [`Self::switch_or_open_scene`] there's nothing to preserve
+    /// here.
     fn start_load(&mut self, action: PendingAction) {
         let (root, create) = match action {
             PendingAction::New(root) => (root, true),
@@ -163,20 +268,11 @@ impl EditorScene {
             }
         };
 
-        self.world = World::new(self.world.camera);
-        self.entity_assets.clear();
-        self.selected = None;
-        self.hovered = None;
-        self.texture_previews.clear();
-        // A live ScriptRuntime holds Entity handles into the *old* World; opening a different
-        // project out from under it would leave it pointing at nothing, so just stop Play first.
-        self.mode = EditorMode::Edit;
-        self.script_errors.clear();
-
+        let scene_path = project.manifest.start_scene.clone();
         let entities: VecDeque<EntityRecord> = if create {
             VecDeque::new()
         } else {
-            match project.load_scene() {
+            match project.load_scene(&scene_path) {
                 Ok(scene_file) => scene_file.entities.into(),
                 Err(e) => {
                     eprintln!("Failed to load scene: {e}");
@@ -188,88 +284,235 @@ impl EditorScene {
         self.recent.add(root);
         let _ = self.recent.save();
 
+        // A live ScriptRuntime holds Entity handles into an old World; opening a different
+        // project invalidates every current tab, so stop Play first.
+        self.mode = EditorMode::Edit;
+        self.script_errors.clear();
+        self.texture_previews.clear();
+
+        let world = World::new(default_camera());
         if entities.is_empty() {
+            self.open_scenes = vec![OpenScene::new(scene_path, world, HashMap::new())];
+            self.active_scene = 0;
             self.project = Some(project);
         } else {
             let total = entities.len();
-            self.load = Some(LoadState::LoadingAssets { project, remaining: entities, total });
+            self.load = Some(LoadState::LoadingProject { project, path: scene_path, world, entity_assets: HashMap::new(), remaining: entities, total });
         }
     }
 
-    /// Loads entity renderables off `remaining` for up to [`LOAD_BUDGET_PER_FRAME`], then either
-    /// puts the rest back for the next frame or, once it's empty, finishes the load.
-    fn continue_load(&mut self, project: Project, mut remaining: VecDeque<EntityRecord>, total: usize, renderer: &Renderer) {
-        let deadline = Instant::now() + LOAD_BUDGET_PER_FRAME;
-        while Instant::now() < deadline {
-            let Some(record) = remaining.pop_front() else { break };
-            let entity = self.world.spawn_empty(record.name, record.transform);
-            if let Some(asset) = record.renderable {
-                match asset.load(renderer, &project.root) {
-                    Ok(renderable) => {
-                        self.world.set_renderable(entity, renderable);
-                        self.entity_assets.insert(entity, asset);
-                    }
-                    Err(e) => eprintln!("Failed to load renderable: {e}"),
-                }
-            }
-            if !record.scripts.is_empty() {
-                self.world.scripts.insert(entity, ScriptList(record.scripts));
-            }
-            if let Some(component) = record.camera {
-                self.world.set_camera(entity, component);
-            }
+    /// Switches to `path` (project-relative) within the currently open project: if it's already
+    /// open in a tab, just activates that tab (no reload — the whole point of keeping scenes
+    /// loaded). Otherwise loads it as a brand new tab, appended once loaded, leaving every other
+    /// tab untouched. A no-op if no project is open, or if `path` fails to load (reported, no tab
+    /// opened, so a corrupt scene file doesn't risk getting silently overwritten by a later Save).
+    /// Stops Play first if it's running — a live `ScriptRuntime` holds `Entity` handles into
+    /// whichever tab was active when Play started, and switching away from it would leave those
+    /// pointing at nothing.
+    fn switch_or_open_scene(&mut self, path: PathBuf) {
+        if matches!(self.mode, EditorMode::Playing { .. }) {
+            self.stop_play();
         }
 
-        if remaining.is_empty() {
-            self.project = Some(project);
+        if let Some(index) = self.open_scenes.iter().position(|scene| scene.path == path) {
+            self.active_scene = index;
+            return;
+        }
+
+        let Some(project) = self.project.as_ref() else { return };
+        let scene_file = match project.load_scene(&path) {
+            Ok(scene_file) => scene_file,
+            Err(e) => {
+                eprintln!("Failed to load scene {}: {e}", path.display());
+                return;
+            }
+        };
+
+        let entities: VecDeque<EntityRecord> = scene_file.entities.into();
+        let world = World::new(default_camera());
+        if entities.is_empty() {
+            self.open_scenes.push(OpenScene::new(path, world, HashMap::new()));
+            self.active_scene = self.open_scenes.len() - 1;
         } else {
-            self.load = Some(LoadState::LoadingAssets { project, remaining, total });
+            let total = entities.len();
+            self.load = Some(LoadState::LoadingScene { path, world, entity_assets: HashMap::new(), remaining: entities, total });
         }
     }
 
-    /// Snapshots the whole [`World`] and starts every enabled script attachment (in order) on
-    /// every entity that has one, then switches to [`EditorMode::Playing`]. A no-op if there's no
-    /// open project (the Play button is disabled in that case anyway — see `ui::draw_menu_bar`).
+    /// Closes the tab for `path`, autosaving it first — a no-op if it's the only tab open (a
+    /// project always keeps at least one scene open for editing) or if `path` isn't open. Stops
+    /// Play first if the tab being closed is the one Play is currently targeting.
+    fn close_scene_tab(&mut self, path: PathBuf) {
+        if self.open_scenes.len() <= 1 {
+            return;
+        }
+        let Some(index) = self.open_scenes.iter().position(|scene| scene.path == path) else { return };
+
+        if index == self.active_scene && matches!(self.mode, EditorMode::Playing { .. }) {
+            self.stop_play();
+        }
+
+        if let Some(project) = self.project.as_ref() {
+            let scene = &self.open_scenes[index];
+            if let Err(e) = project.save_scene(&scene.path, &scene.world, &scene.entity_assets) {
+                eprintln!("Failed to save {}: {e}", scene.path.display());
+            }
+        }
+
+        self.open_scenes.remove(index);
+        if index < self.active_scene {
+            self.active_scene -= 1;
+        } else if self.active_scene >= self.open_scenes.len() {
+            self.active_scene = self.open_scenes.len() - 1;
+        }
+    }
+
+    /// Renames the scene file at `old_path` (project-relative) to `new_stem`, keeping its
+    /// extension, then updates `ProjectManifest.start_scene` (if it named the renamed scene) and
+    /// any open tab's identity to match. Refuses (and reports, rather than silently overwriting)
+    /// if something is already using the target name. Doesn't fix up `scene.change("...")` calls
+    /// inside script source — see `ui::draw_scene_tile`'s doc comment for why that's not possible
+    /// the way `ui::rename_script` fixes up `ScriptAttachment`s.
+    fn rename_scene(&mut self, old_path: PathBuf, new_stem: String) {
+        let new_stem = new_stem.trim();
+        if new_stem.is_empty() {
+            return;
+        }
+        let extension = old_path.extension().map(|ext| ext.to_string_lossy().into_owned()).unwrap_or_default();
+        let new_path = old_path.with_file_name(format!("{new_stem}.{extension}"));
+        if new_path == old_path {
+            return;
+        }
+
+        let Some(project) = self.project.as_mut() else { return };
+        let old_absolute = project.root.join(&old_path);
+        let new_absolute = project.root.join(&new_path);
+        if new_absolute.exists() {
+            eprintln!("Failed to rename scene: {} already exists", new_path.display());
+            return;
+        }
+        if let Err(e) = std::fs::rename(&old_absolute, &new_absolute) {
+            eprintln!("Failed to rename scene: {e}");
+            return;
+        }
+
+        if project.manifest.start_scene == old_path {
+            if let Err(e) = project.set_start_scene(new_path.clone()) {
+                eprintln!("Failed to update start scene after rename: {e}");
+            }
+        }
+
+        for scene in &mut self.open_scenes {
+            if scene.path == old_path {
+                scene.path = new_path.clone();
+            }
+        }
+    }
+
+    /// Snapshots the active tab's whole [`World`] and starts every enabled script attachment (in
+    /// order) on every entity that has one, then switches to [`EditorMode::Playing`]. A no-op if
+    /// there's no open project (the Play button is disabled in that case anyway — see
+    /// `ui::draw_menu_bar`).
     fn start_play(&mut self) {
         let Some(project) = self.project.as_ref() else { return };
+        let scene = &self.open_scenes[self.active_scene];
 
-        let world_snapshot = self.world.clone();
+        let world_snapshot = scene.world.clone();
         let mut runtime = ScriptRuntime::new(project.root.clone());
         // Without this, `world.find(...)` inside an `on_start` hook would see nothing but a
         // default-empty snapshot (only populated per-frame from here on, right before
         // `update_entity`) and always return `()` — `on_start` gets the same start-of-Play
         // snapshot guarantee `on_update` already has for cross-entity reads.
-        runtime.begin_frame(&self.world);
+        runtime.begin_frame(&scene.world);
 
-        for entity in self.world.iter_entities().collect::<Vec<_>>() {
-            let Some(list) = self.world.scripts.get(entity) else { continue };
-            let starts: Vec<(usize, PathBuf)> = list
-                .0
-                .iter()
-                .enumerate()
-                .filter(|(_, attachment)| attachment.enabled)
-                .map(|(index, attachment)| (index, project.root.join(&attachment.path)))
-                .collect();
-
-            for (index, script_path) in starts {
-                if let Err(e) = runtime.start_script(&self.world, entity, index, &script_path) {
-                    self.script_errors.push((format_script_error(&e), Instant::now()));
-                }
-            }
+        for error in runtime.start_all_scripts(&scene.world, &project.root) {
+            self.script_errors.push((format_script_error(&error), Instant::now()));
         }
 
         self.mode = EditorMode::Playing { world_snapshot, runtime };
     }
 
-    /// Restores the whole [`World`] [`start_play`](Self::start_play) snapshotted and drops the
-    /// [`ScriptRuntime`] (and with it every script's persistent state), switching back to
-    /// [`EditorMode::Edit`].
+    /// Restores the whole [`World`] [`start_play`](Self::start_play) snapshotted (into whichever
+    /// tab was active when Play started) and drops the [`ScriptRuntime`] (and with it every
+    /// script's persistent state), switching back to [`EditorMode::Edit`].
     fn stop_play(&mut self) {
         if let EditorMode::Playing { world_snapshot, .. } = std::mem::replace(&mut self.mode, EditorMode::Edit) {
-            self.world = world_snapshot;
+            self.open_scenes[self.active_scene].world = world_snapshot;
         }
         self.script_errors.clear();
     }
+
+    /// Handles a Play click: if any tab is dirty, holds off starting Play and instead raises the
+    /// confirmation dialog (see [`Self::play_confirmation`]) — `scene.change(...)` reads straight
+    /// off disk, so a script that jumps to a dirty *other* tab during this session would otherwise
+    /// silently see whatever was last saved there, not what's on screen right now. Starts Play
+    /// immediately, with no prompt, if nothing is dirty.
+    fn request_play(&mut self) {
+        let dirty_paths: Vec<PathBuf> = self.open_scenes.iter().filter(|scene| scene.dirty).map(|scene| scene.path.clone()).collect();
+        if dirty_paths.is_empty() {
+            self.start_play();
+        } else {
+            self.play_confirmation = Some(dirty_paths);
+        }
+    }
+
+    /// Saves every dirty open tab (not just the active one) — the "Save & Play" choice in the
+    /// pre-Play confirmation dialog, and also what a successful Export does before packaging (see
+    /// `Scene::update`'s `export_project` handling) — both need every tab's on-disk copy current,
+    /// not just whichever one is active.
+    fn save_all_dirty(&mut self) {
+        let Some(project) = self.project.as_ref() else { return };
+        for scene in self.open_scenes.iter_mut() {
+            if !scene.dirty {
+                continue;
+            }
+            match project.save_scene(&scene.path, &scene.world, &scene.entity_assets) {
+                Ok(()) => scene.dirty = false,
+                Err(e) => eprintln!("Failed to save {}: {e}", scene.path.display()),
+            }
+        }
+    }
+}
+
+/// What the user chose in the pre-Play "unsaved changes" dialog (see [`draw_play_confirmation`]).
+enum PlayConfirmAction {
+    SaveAndPlay,
+    PlayWithoutSaving,
+    Cancel,
+}
+
+/// Shown instead of the normal editor UI while [`EditorScene::play_confirmation`] is set — Play
+/// was requested while one or more tabs have unsaved edits. Lists which scenes are dirty so the
+/// choice is informed, then lets the user save everything first, play anyway (accepting that a
+/// `scene.change(...)` to one of these would load its last-saved, not current, contents), or
+/// cancel.
+fn draw_play_confirmation(ui: &mut egui::Ui, dirty_paths: &[PathBuf]) -> Option<PlayConfirmAction> {
+    let mut action = None;
+    egui::CentralPanel::default().show(ui, |ui| {
+        ui.centered_and_justified(|ui| {
+            ui.vertical_centered(|ui| {
+                ui.label("Unsaved changes in:");
+                for path in dirty_paths {
+                    ui.label(path.display().to_string());
+                }
+                ui.add_space(8.0);
+                ui.label("A script that switches to one of these during Play would load its last-saved contents, not what's shown here.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save & Play").clicked() {
+                        action = Some(PlayConfirmAction::SaveAndPlay);
+                    }
+                    if ui.button("Play Without Saving").clicked() {
+                        action = Some(PlayConfirmAction::PlayWithoutSaving);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        action = Some(PlayConfirmAction::Cancel);
+                    }
+                });
+            });
+        });
+    });
+    action
 }
 
 fn format_script_error(error: &ScriptError) -> String {
@@ -326,17 +569,63 @@ impl Scene for EditorScene {
         if let Some(state) = self.load.take() {
             match state {
                 LoadState::Pending(action) => self.start_load(action),
-                LoadState::LoadingAssets { project, remaining, total } => {
-                    self.continue_load(project, remaining, total, renderer);
+                LoadState::LoadingProject { project, path, mut world, mut entity_assets, mut remaining, total } => {
+                    let done = spawn_budgeted(&mut world, &mut entity_assets, &mut remaining, renderer, &project.root);
+                    if done {
+                        self.open_scenes = vec![OpenScene::new(path, world, entity_assets)];
+                        self.active_scene = 0;
+                        self.project = Some(project);
+                    } else {
+                        self.load = Some(LoadState::LoadingProject { project, path, world, entity_assets, remaining, total });
+                    }
+                }
+                LoadState::LoadingScene { path, mut world, mut entity_assets, mut remaining, total } => {
+                    if let Some(project) = self.project.as_ref() {
+                        let done = spawn_budgeted(&mut world, &mut entity_assets, &mut remaining, renderer, &project.root);
+                        if done {
+                            self.open_scenes.push(OpenScene::new(path, world, entity_assets));
+                            self.active_scene = self.open_scenes.len() - 1;
+                        } else {
+                            self.load = Some(LoadState::LoadingScene { path, world, entity_assets, remaining, total });
+                        }
+                    }
                 }
             }
 
-            if let Some(LoadState::LoadingAssets { remaining, total, .. }) = &self.load {
-                let loaded = total - remaining.len();
-                let total = *total;
+            if let Some(load_state) = &self.load {
+                let (loaded, total) = match load_state {
+                    LoadState::LoadingProject { remaining, total, .. } => (*total - remaining.len(), *total),
+                    LoadState::LoadingScene { remaining, total, .. } => (*total - remaining.len(), *total),
+                    LoadState::Pending(_) => (0, 0),
+                };
                 self.egui.run(renderer, |ui| draw_loading_screen(ui, loaded, total));
                 return SceneTransition::None;
             }
+        }
+
+        if let Some(dirty_paths) = self.play_confirmation.clone() {
+            let mut action = None;
+            self.egui.run(renderer, |ui| action = draw_play_confirmation(ui, &dirty_paths));
+            match action {
+                Some(PlayConfirmAction::SaveAndPlay) => {
+                    self.save_all_dirty();
+                    self.play_confirmation = None;
+                    self.start_play();
+                }
+                Some(PlayConfirmAction::PlayWithoutSaving) => {
+                    self.play_confirmation = None;
+                    self.start_play();
+                }
+                Some(PlayConfirmAction::Cancel) => {
+                    self.play_confirmation = None;
+                }
+                None => {}
+            }
+            // Always yield the frame here, whether or not the dialog was just resolved — an
+            // `egui::run` call was already spent drawing it above (only one is allowed per frame,
+            // same constraint the loading screen has), so the normal UI can't also render this
+            // same frame. One frame's delay picking up Play/Edit mode is imperceptible.
+            return SceneTransition::None;
         }
 
         let mouse_pos = mouse_state.position();
@@ -350,18 +639,22 @@ impl Scene for EditorScene {
         let is_playing = matches!(self.mode, EditorMode::Playing { .. });
         let script_error_messages: Vec<String> = self.script_errors.iter().map(|(message, _)| message.clone()).collect();
         let export_status_message = self.export_status.as_ref().map(|(message, _)| message.as_str());
+        let open_scene_tabs: Vec<(PathBuf, bool)> = self.open_scenes.iter().map(|scene| (scene.path.clone(), scene.dirty)).collect();
+        let active_scene = self.active_scene;
 
-        let world = &mut self.world;
-        let selected = &mut self.selected;
-        let renaming = &mut self.renaming;
-        let rename_buffer = &mut self.rename_buffer;
+        let active_index = self.active_scene;
+        let (world, selected, renaming, rename_buffer, entity_assets, current_scene, current_scene_dirty) = {
+            let scene = &mut self.open_scenes[active_index];
+            (&mut scene.world, &mut scene.selected, &mut scene.renaming, &mut scene.rename_buffer, &mut scene.entity_assets, scene.path.clone(), scene.dirty)
+        };
         let project = self.project.as_ref();
-        let entity_assets = &mut self.entity_assets;
         let assets_expanded = &mut self.assets_expanded;
         let texture_previews = &mut self.texture_previews;
         let settings = &mut self.settings;
         let renaming_script = &mut self.renaming_script;
         let script_rename_buffer = &mut self.script_rename_buffer;
+        let renaming_scene = &mut self.renaming_scene;
+        let scene_rename_buffer = &mut self.scene_rename_buffer;
         let mut requests = ui::UiRequests::default();
         self.egui.run(renderer, |ui| {
             ui::draw(
@@ -379,22 +672,44 @@ impl Scene for EditorScene {
                 settings,
                 renaming_script,
                 script_rename_buffer,
+                renaming_scene,
+                scene_rename_buffer,
                 export_status_message,
+                &current_scene,
+                current_scene_dirty,
+                &open_scene_tabs,
+                active_scene,
                 &mut requests,
             );
         });
+
+        if requests.edited {
+            self.open_scenes[active_index].dirty = true;
+        }
+
+        if requests.save_scene {
+            if let Some(project) = self.project.as_ref() {
+                let scene = &self.open_scenes[active_index];
+                match project.save_scene(&scene.path, &scene.world, &scene.entity_assets) {
+                    Ok(()) => self.open_scenes[active_index].dirty = false,
+                    Err(e) => eprintln!("Failed to save project: {e}"),
+                }
+            }
+        }
 
         if let Some(root) = requests.new_project.take() {
             self.queue_action(PendingAction::New(root));
         }
 
         if let Some(output_dir) = requests.export_project.take() {
+            if self.project.is_some() {
+                // Export packages the scene files off disk, not any tab's `World` directly — save
+                // every dirty tab first (not just the active one) so unsaved edits anywhere
+                // actually make it into the exported game.
+                self.save_all_dirty();
+            }
             if let Some(project) = self.project.as_ref() {
-                // Export packages `scenes/main.ron` off disk, not `self.world` directly — save
-                // first so unsaved edits actually make it into the exported game.
-                let result = project
-                    .save_scene(&self.world, &self.entity_assets)
-                    .and_then(|()| crate::export::export_project(project, &output_dir));
+                let result = crate::export::export_project(project, &output_dir);
                 let message = match &result {
                     Ok(()) => format!("Exported to {}", output_dir.display()),
                     Err(e) => format!("Export failed: {e}"),
@@ -410,11 +725,31 @@ impl Scene for EditorScene {
             self.queue_action(PendingAction::Open(root));
         }
 
+        if let Some(path) = requests.switch_scene.take() {
+            self.switch_or_open_scene(path);
+        }
+
+        if let Some(path) = requests.close_scene_tab.take() {
+            self.close_scene_tab(path);
+        }
+
+        if let Some((old_path, new_stem)) = requests.rename_scene.take() {
+            self.rename_scene(old_path, new_stem);
+        }
+
+        if let Some(path) = requests.set_start_scene.take() {
+            if let Some(project) = self.project.as_mut() {
+                if let Err(e) = project.set_start_scene(path) {
+                    eprintln!("Failed to set start scene: {e}");
+                }
+            }
+        }
+
         if requests.toggle_play {
             if is_playing {
                 self.stop_play();
             } else {
-                self.start_play();
+                self.request_play();
             }
         }
 
@@ -436,8 +771,10 @@ impl Scene for EditorScene {
                             }
                             Renderable::Model(_) => RenderableAsset::Model { model_path: path },
                         };
-                        self.world.set_renderable(entity, renderable);
-                        self.entity_assets.insert(entity, asset);
+                        let scene = &mut self.open_scenes[self.active_scene];
+                        scene.world.set_renderable(entity, renderable);
+                        scene.entity_assets.insert(entity, asset);
+                        scene.dirty = true;
                     }
                     Err(e) => eprintln!("Failed to attach renderable: {e}"),
                 }
@@ -446,46 +783,50 @@ impl Scene for EditorScene {
 
         self.hover_blink_time += delta_time;
 
+        let active_index = self.active_scene;
         match &mut self.mode {
             EditorMode::Edit => {
                 if !self.egui.wants_pointer_input() {
-                    self.fly_camera.update(delta_time, input_state, mouse_state, &mut self.world.camera, mouse_delta);
+                    let scene = &mut self.open_scenes[active_index];
+                    scene.fly_camera.update(delta_time, input_state, mouse_state, &mut scene.world.camera, mouse_delta);
 
                     let size = renderer.size();
                     let ndc_x = (mouse_pos.0 / (size.width.max(1) as f32)) * 2.0 - 1.0;
                     let ndc_y = 1.0 - (mouse_pos.1 / (size.height.max(1) as f32)) * 2.0;
-                    self.hovered = picking::pick(&self.world, &self.world.camera, ndc_x, ndc_y);
+                    scene.hovered = picking::pick(&scene.world, &scene.world.camera, ndc_x, ndc_y);
 
                     if mouse_state.is_button_pressed(winit::event::MouseButton::Left) {
-                        self.selected = self.hovered;
+                        scene.selected = scene.hovered;
                     }
                 } else {
-                    self.hovered = None;
+                    self.open_scenes[active_index].hovered = None;
                 }
             }
             EditorMode::Playing { runtime, .. } => {
                 // Camera flying and viewport picking are edit-mode-only for v1 — playing just
                 // runs scripts against the live World; see the implementation plan's
                 // "Camera/picking fully disabled during Play" note.
-                self.hovered = None;
-                runtime.begin_frame(&self.world);
-                for entity in self.world.iter_entities().collect::<Vec<_>>() {
-                    for error in runtime.update_entity(&mut self.world, entity, delta_time, input_state, mouse_state, mouse_delta, Some(&*renderer)) {
+                let scene = &mut self.open_scenes[active_index];
+                scene.hovered = None;
+                runtime.begin_frame(&scene.world);
+                for entity in scene.world.iter_entities().collect::<Vec<_>>() {
+                    for error in runtime.update_entity(&mut scene.world, entity, delta_time, input_state, mouse_state, mouse_delta, Some(&*renderer)) {
                         self.script_errors.push((format_script_error(&error), Instant::now()));
                     }
                 }
             }
         }
 
-        self.world.sync_transforms();
+        let scene = &mut self.open_scenes[active_index];
+        scene.world.sync_transforms();
         let size = renderer.size();
         let aspect = size.width as f32 / (size.height.max(1) as f32);
-        self.world.camera.aspect = aspect;
+        scene.world.camera.aspect = aspect;
 
         let push_camera = if is_playing {
-            self.world.active_camera(aspect).unwrap_or(self.world.camera)
+            scene.world.active_camera(aspect).unwrap_or(scene.world.camera)
         } else {
-            self.world.camera
+            scene.world.camera
         };
         *renderer.camera_mut() = push_camera;
 
@@ -496,10 +837,12 @@ impl Scene for EditorScene {
         let blink_alpha = 0.15 + 0.35 * (self.hover_blink_time * 6.0).sin().abs();
         let hover_highlight = Color::new(1.0, 1.0, 1.0, blink_alpha as f64);
         let no_highlight = Color::new(1.0, 1.0, 1.0, 0.0);
+        let is_edit_mode = matches!(self.mode, EditorMode::Edit);
+        let scene = &mut self.open_scenes[self.active_scene];
 
-        for (entity, renderable) in self.world.renderables.iter_mut() {
-            let highlight = if self.hovered == Some(entity) { hover_highlight } else { no_highlight };
-            let is_selected = self.selected == Some(entity);
+        for (entity, renderable) in scene.world.renderables.iter_mut() {
+            let highlight = if scene.hovered == Some(entity) { hover_highlight } else { no_highlight };
+            let is_selected = scene.selected == Some(entity);
 
             match renderable {
                 Renderable::Sprite(sprite) => {
@@ -522,15 +865,15 @@ impl Scene for EditorScene {
             }
         }
 
-        if matches!(self.mode, EditorMode::Edit) {
-            for (entity, component) in self.world.cameras.iter() {
-                let Some(transform) = self.world.transforms.get(entity) else { continue };
-                let color = if self.selected == Some(entity) {
+        if is_edit_mode {
+            for (entity, component) in scene.world.cameras.iter() {
+                let Some(transform) = scene.world.transforms.get(entity) else { continue };
+                let color = if scene.selected == Some(entity) {
                     Color::new(0.3, 0.7, 1.0, 1.0)
                 } else {
                     Color::new(0.6, 0.6, 0.6, 1.0)
                 };
-                draw_camera_gizmo(pass, &self.world.camera, transform, component, color);
+                draw_camera_gizmo(pass, &scene.world.camera, transform, component, color);
             }
         }
     }
@@ -550,7 +893,7 @@ fn draw_loading_screen(ui: &mut egui::Ui, loaded: usize, total: usize) {
             ui.vertical_centered(|ui| {
                 ui.spinner();
                 ui.add_space(8.0);
-                ui.label(format!("Loading project... ({loaded}/{total})"));
+                ui.label(format!("Loading scene... ({loaded}/{total})"));
             });
         });
     });

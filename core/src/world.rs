@@ -132,6 +132,13 @@ pub struct World {
     pub renderables: ComponentStore<Renderable>,
     pub scripts: ComponentStore<ScriptList>,
     pub cameras: ComponentStore<CameraComponent>,
+    /// Marks an entity as surviving a scene change (`WorldCommand::ChangeScene`) instead of being
+    /// torn down with the rest of the outgoing scene — Unity's `DontDestroyOnLoad`. A plain
+    /// `ComponentStore<()>` marker, mirroring how `CameraComponent::active` flags "the" active
+    /// camera, since most entities never need it. Deliberately not part of `EntityRecord`/
+    /// `SceneFile` — like `DontDestroyOnLoad` itself, it's a runtime-only script call
+    /// (`entity.set_persistent(true)`), not an authorable/serialized property.
+    pub persistent: ComponentStore<()>,
     pub camera: Camera,
 }
 
@@ -144,6 +151,7 @@ impl World {
             renderables: ComponentStore::new(),
             scripts: ComponentStore::new(),
             cameras: ComponentStore::new(),
+            persistent: ComponentStore::new(),
             camera,
         }
     }
@@ -171,6 +179,19 @@ impl World {
         self.cameras.remove(entity);
     }
 
+    /// Marks (or unmarks) `entity` as persistent — see [`World::persistent`]'s doc comment.
+    pub fn set_persistent(&mut self, entity: Entity, persistent: bool) {
+        if persistent {
+            self.persistent.insert(entity, ());
+        } else {
+            self.persistent.remove(entity);
+        }
+    }
+
+    pub fn is_persistent(&self, entity: Entity) -> bool {
+        self.persistent.get(entity).is_some()
+    }
+
     pub fn despawn(&mut self, entity: Entity) {
         self.allocator.despawn(entity);
         self.names.remove(entity);
@@ -178,6 +199,7 @@ impl World {
         self.renderables.remove(entity);
         self.scripts.remove(entity);
         self.cameras.remove(entity);
+        self.persistent.remove(entity);
     }
 
     pub fn is_alive(&self, entity: Entity) -> bool {
@@ -188,6 +210,17 @@ impl World {
     /// them all — unlike `renderables`, which only some entities have).
     pub fn iter_entities(&self) -> impl Iterator<Item = Entity> + '_ {
         self.transforms.iter().map(|(entity, _)| entity)
+    }
+
+    /// Despawns every entity except ones marked persistent — the "full teardown" half of a scene
+    /// change (see `WorldCommand::ChangeScene`'s handling in `ScriptRuntime::drain_commands`).
+    /// Collects into a `Vec` first since `despawn` mutates the same `transforms` store
+    /// `iter_entities` reads from.
+    pub fn despawn_non_persistent(&mut self) {
+        let doomed: Vec<Entity> = self.iter_entities().filter(|&e| !self.is_persistent(e)).collect();
+        for entity in doomed {
+            self.despawn(entity);
+        }
     }
 
     /// Syncs every entity's ECS [`Transform`] into its [`Renderable`]'s own GPU-facing matrix.
@@ -222,6 +255,30 @@ mod tests {
 
     fn test_camera() -> Camera {
         Camera { position: Vec3::ZERO, yaw: 0.0, pitch: 0.0, aspect: 1.0, fov: 45.0, znear: 0.1, zfar: 100.0 }
+    }
+
+    #[test]
+    fn despawn_non_persistent_keeps_persistent_entities_alive() {
+        let mut world = World::new(test_camera());
+        let persistent = world.spawn_empty("Persistent", Transform::default());
+        let transient = world.spawn_empty("Transient", Transform::default());
+        world.set_persistent(persistent, true);
+
+        world.despawn_non_persistent();
+
+        assert!(world.is_alive(persistent));
+        assert!(!world.is_alive(transient));
+    }
+
+    #[test]
+    fn despawn_clears_the_persistent_flag() {
+        let mut world = World::new(test_camera());
+        let entity = world.spawn_empty("Persistent", Transform::default());
+        world.set_persistent(entity, true);
+
+        world.despawn(entity);
+
+        assert!(!world.is_persistent(entity));
     }
 
     #[test]

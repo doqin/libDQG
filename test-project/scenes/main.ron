@@ -3,7 +3,7 @@
         (
             name: "kako_cube_1",
             transform: (
-                position: (-4.8, 0.0, 0.0),
+                position: (-3.4, 0.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
@@ -136,6 +136,22 @@
                 zfar: 100.0,
                 active: true,
             )),
+        ),
+        (
+            name: "world_entity",
+            transform: (
+                position: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            renderable: None,
+            scripts: [
+                (
+                    path: "scripts\\change_scene.rhai",
+                    enabled: true,
+                ),
+            ],
+            camera: None,
         ),
     ],
 )

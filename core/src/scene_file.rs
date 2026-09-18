@@ -1,15 +1,37 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::ecs::Entity;
 use crate::renderer::{Model, Renderer, Sprite, Texture};
-use crate::scripting::ScriptAttachment;
-use crate::world::{CameraComponent, Renderable, Transform};
+use crate::scripting::{ScriptAttachment, ScriptList};
+use crate::world::{CameraComponent, Renderable, Transform, World};
 
-/// The on-disk form of a scene: an editor project's `scenes/main.ron`, or an exported game's
-/// `res/scene.ron` — both the editor and the `runtime` player deserialize this same type.
+/// The on-disk form of a scene: one of an editor project's `scenes/*.ron` files, or one of an
+/// exported game's `res/scenes/*.ron` files — both the editor and the `runtime` player
+/// deserialize this same type. A project can hold more than one (see
+/// `editor::Project::list_scenes`); which one a game boots into is
+/// [`GameManifest::start_scene`], and scripts switch between them via `scene.change(path)`
+/// (see `crate::scripting`'s `ScriptScene`/`WorldCommand::ChangeScene`).
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct SceneFile {
     pub entities: Vec<EntityRecord>,
+}
+
+impl SceneFile {
+    /// Reads and parses the `.ron` scene file at `path` — the single source of truth for the
+    /// on-disk format, used by the editor, `runtime`, and `ScriptRuntime`'s `scene.change(...)`
+    /// handling alike.
+    pub fn load(path: &Path) -> anyhow::Result<Self> {
+        Ok(ron::from_str(&fs::read_to_string(path)?)?)
+    }
+
+    /// Serializes and writes `self` to `path` as pretty-printed RON — the save-side counterpart
+    /// to [`SceneFile::load`].
+    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        fs::write(path, ron::ser::to_string_pretty(self, Default::default())?)?;
+        Ok(())
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -21,6 +43,42 @@ pub struct EntityRecord {
     pub scripts: Vec<ScriptAttachment>,
     #[serde(default)]
     pub camera: Option<CameraComponent>,
+}
+
+impl EntityRecord {
+    /// Spawns this record into `world`: creates the entity with its saved name/transform, loads
+    /// its `renderable` (if any, resolved against `base_dir` — an editor project's root, or an
+    /// exported game's `res/` directory) via [`RenderableAsset::load`], and copies over its
+    /// `scripts`/`camera` components verbatim (starting the scripts is a separate step — see
+    /// `crate::scripting::ScriptRuntime::start_all_scripts`). A renderable load failure is
+    /// reported to stderr and leaves the entity without one, rather than failing the whole spawn.
+    /// Returns the spawned entity plus the [`RenderableAsset`] if one loaded successfully — the
+    /// editor's asset-tracking map needs it back for re-saving; other callers can ignore it.
+    pub fn spawn_into(self, world: &mut World, renderer: Option<&Renderer>, base_dir: &Path) -> (Entity, Option<RenderableAsset>) {
+        let entity = world.spawn_empty(self.name, self.transform);
+        let mut loaded_asset = None;
+
+        if let Some(asset) = self.renderable {
+            match renderer {
+                Some(renderer) => match asset.load(renderer, base_dir) {
+                    Ok(renderable) => {
+                        world.set_renderable(entity, renderable);
+                        loaded_asset = Some(asset);
+                    }
+                    Err(e) => eprintln!("Failed to load renderable: {e}"),
+                },
+                None => eprintln!("Failed to load renderable: no renderer available"),
+            }
+        }
+        if !self.scripts.is_empty() {
+            world.scripts.insert(entity, ScriptList(self.scripts));
+        }
+        if let Some(component) = self.camera {
+            world.set_camera(entity, component);
+        }
+
+        (entity, loaded_asset)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,10 +143,13 @@ impl RenderableAsset {
 }
 
 /// Window settings for an exported game: written to `res/game.ron` by the editor's export
-/// feature and read by the `runtime` binary at startup, alongside `res/scene.ron`.
+/// feature and read by the `runtime` binary at startup, alongside `res/scenes/*.ron`.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct GameManifest {
     pub title: String,
     pub width: u32,
     pub height: u32,
+    /// Project-relative path (mirrored 1:1 under `res/`) to the scene `runtime` boots into —
+    /// e.g. `"scenes/main.ron"`, resolved as `res_dir.join(start_scene)`.
+    pub start_scene: PathBuf,
 }

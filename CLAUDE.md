@@ -106,27 +106,40 @@ matrix directly.
   a sparse `Vec<Option<(generation, T)>>` keyed by entity index, generation-checked on every
   access so a stale `Entity` never reads/writes a recycled slot. There's no query/archetype
   abstraction — components are just named `ComponentStore<T>` fields on `World`.
-- [core/src/world.rs](core/src/world.rs) — `World` holds `transforms`, `names`, `renderables`, and
-  `scripts`, each its own `ComponentStore`. Adding a new component kind means adding a new named
-  field by hand (and remembering to clear it in `World::despawn`), not registering a type
-  generically. `World::sync_transforms()` copies each entity's `Transform` into its `Renderable`'s
-  GPU-facing matrix once per frame.
+- [core/src/world.rs](core/src/world.rs) — `World` holds `transforms`, `names`, `renderables`,
+  `scripts`, `cameras`, and `persistent`, each its own `ComponentStore`. Adding a new component
+  kind means adding a new named field by hand (and remembering to clear it in `World::despawn`),
+  not registering a type generically. `persistent` is a `ComponentStore<()>` marker (Unity's
+  `DontDestroyOnLoad`) set only via the scripting API (`entity.set_persistent(true)`, see
+  Scripting below) — an entity with it survives `World::despawn_non_persistent`, the teardown half
+  of a scene change. `World::sync_transforms()` copies each entity's `Transform` into its
+  `Renderable`'s GPU-facing matrix once per frame.
 
 ### Editor: a scene editor built on `libdqg`
 
 - [editor/src/main.rs](editor/src/main.rs) — entry point; builds a `Game` starting at
   `MenuScene` (New/Open/Recent project), which hands off to `EditorScene` once a project is
   chosen. UI is all `egui` (`editor/src/egui_layer.rs` wraps the egui/wgpu/winit glue), drawn in
-  [editor/src/ui.rs](editor/src/ui.rs): menu bar, hierarchy panel, assets panel, inspector.
+  [editor/src/ui.rs](editor/src/ui.rs): menu bar, scene tab strip, hierarchy panel, assets panel,
+  inspector.
 - [editor/src/project.rs](editor/src/project.rs) — `Project` is a folder on disk (`project.ron`
-  manifest, `assets/{textures,models}/`, `scenes/main.ron`, `scripts/`). `SceneFile`/`EntityRecord`/
-  `RenderableAsset` (the serialization boundary for an entity —
-  name/transform/renderable/scripts/camera) live in
+  manifest, `assets/{textures,models}/`, `scenes/*.ron`, `scripts/`). A project can hold more than
+  one scene file; `ProjectManifest::start_scene` (project-relative path, e.g. `"scenes/main.ron"`)
+  names the one a new `EditorScene`/export boots into. Any number of scenes can be open for
+  editing at once as tabs — `EditorScene::open_scenes: Vec<OpenScene>` (each its own `World`,
+  entity-asset tracking, selection state, and viewport camera) plus `active_scene: usize` — kept
+  fully loaded in memory for as long as their tab stays open, unlike a single-scene design that
+  would reload from disk on every switch; see `EditorScene::switch_or_open_scene`/`close_scene_tab`,
+  `Project::list_scenes`/`create_scene`/`set_start_scene`, and the Assets panel's "Scenes" section
+  (`editor/src/ui.rs`'s `draw_scene_group`/`draw_scene_tabs`). `SceneFile`/`EntityRecord`/
+  `RenderableAsset` (the serialization boundary for
+  an entity — name/transform/renderable/scripts/camera) live in
   [core/src/scene_file.rs](core/src/scene_file.rs), not this file, so `runtime` can deserialize the
   same format without depending on the editor's egui/rfd stack; `project.rs` just re-exports them
   and owns the editor-only parts (`Project::create`/`open`/`save_scene`/`import_asset`/
   `create_script`). Assets and scripts are referenced by project-root-relative path, never by an
-  ID/handle.
+  ID/handle — scenes follow the same convention (`scene.change("scenes/level2.ron")` from a
+  script, see Scripting below).
 - [editor/src/picking.rs](editor/src/picking.rs) — mesh-accurate ray/triangle picking for models,
   ray/sphere for sprites, driving hover/selection highlight in `EditorScene::render`.
 - **Scripting**: entities carry a stack of `.rhai` script attachments
@@ -140,12 +153,20 @@ matrix directly.
   isn't the right place for). `ScriptRuntime`
   (also in `core/src/scripting.rs`, reused as-is by the `runtime` player — see below) compiles/caches
   one Rhai `AST` per script path and runs each attachment's `on_start()`/`on_update(dt, input)`
-  against a minimal `entity` API (`x`/`y`/`z` get-set, `translate`/`rotate`/`scale(x, y, z)`,
-  `name()`) and a read-only `input` snapshot (`is_held(name)`/`is_pressed(name)`, key names
-  matching `KeyCode`'s own variant identifiers via `KeyCode::from_name`) — deliberately no
-  query/lookup API; a script only ever touches its own entity. Both `entity`'s and `input`'s Rhai
-  bindings are registered via `#[derive(CustomType)]`/`#[rhai_type(...)]` on `ScriptApi`/
-  `ScriptInput` rather than a hand-written builder chain — a plain field becomes a get/set
+  against four Rhai globals: `entity` (its own entity — position/rotation/scale get-set,
+  `translate`/`rotate`/`look_at`/`scale`/`name`/`set_name`/`despawn`/`set_persistent`/
+  `attach_script`/`set_script_enabled`/`set_sprite`/`set_model`/`detach_renderable`), `world`
+  (cross-entity: `find(name)`/`spawn_entity(...)`, reading a frame-start-frozen snapshot), `scene`
+  (`change(path)`, tearing down every non-persistent entity and loading a different project's scene
+  file — see `WorldCommand::ChangeScene`), and a read-only `input` snapshot (`is_held(name)`/
+  `is_pressed(name)`, key names matching `KeyCode`'s own variant identifiers via
+  `KeyCode::from_name`). See [editor/SCRIPTING.md](editor/SCRIPTING.md) for the full user-facing
+  API. Every mutating call queues a `WorldCommand` onto a shared queue rather than touching `World`
+  directly (Rhai custom types must be `Clone + 'static`, so nothing reachable from inside a script
+  call can hold a live `&mut World`) — `ScriptRuntime::drain_commands` is the only place `World` is
+  actually mutated, right after each `on_start`/`on_update` call returns. `entity`/`world`/`scene`/
+  `input`'s Rhai bindings are registered via `#[derive(CustomType)]`/`#[rhai_type(...)]` on their
+  respective Rust types rather than a hand-written builder chain — a plain field becomes a get/set
   property automatically, and anything else (methods, or a `#[rhai_type(skip)]`ed field) is
   registered once in that type's `register_extra`. Persistent per-script state relies on Rhai
   closures (`let on_update = |dt, input| { ... };`, not a plain `fn`) capturing `Scope` variables
@@ -161,26 +182,37 @@ matrix directly.
 
 - [core/src/scene_file.rs](core/src/scene_file.rs) — `SceneFile`/`EntityRecord`/`RenderableAsset`/
   `RenderableKind`/`GameManifest`, the on-disk scene/game format shared by `editor` and `runtime`.
-  `RenderableAsset::load(renderer, base_dir)` resolves stored asset paths against whatever
-  `base_dir` the caller passes — an editor `Project`'s root, or an exported game's `res/` — so
-  neither side needs its own copy of this logic.
+  `SceneFile::load`/`save` are the single read/write path both `editor::Project` and `runtime` go
+  through (also used by `WorldCommand::ChangeScene`'s handling — see Scripting above).
+  `EntityRecord::spawn_into` and `ScriptRuntime::start_all_scripts` are the shared "spawn a scene's
+  entities" / "start their scripts" halves reused by `EditorScene`'s own scene-loading (spawning is
+  spread incrementally across frames via `spawn_budgeted`, `editor_scene.rs`; script-starting
+  happens all at once, in `start_play`), `runtime`'s `RuntimeScene::start`, and a script's
+  `scene.change(...)` alike, so all three load a scene identically. `RenderableAsset::load(renderer,
+  base_dir)` resolves stored asset paths
+  against whatever `base_dir` the caller passes — an editor `Project`'s root, or an exported game's
+  `res/` — so neither side needs its own copy of this logic. `GameManifest::start_scene`
+  (project-relative, e.g. `"scenes/main.ron"`) names the scene an exported game boots into.
 - [editor/src/export.rs](editor/src/export.rs) — `File > Export...` (`editor/src/ui.rs`) calls
   `export::export_project`, which is pure file copying, not a `cargo build`: it locates a prebuilt
   `runtime(.exe)` template next to the running editor binary (`templates/` subfolder, or flat next
   to it — the latter is what a plain `cargo build` already provides, since every workspace binary
   lands in the same `target/<profile>/`), copies it renamed to the project name, then mirrors the
-  project's `assets/`, `scripts/`, and `scenes/main.ron` (saved first, so unsaved edits are
-  included) under an output `res/` folder alongside a generated `res/game.ron` — wiping any
-  previous `res/` first so a removed/renamed asset doesn't linger across re-exports.
+  project's `assets/`, `scripts/`, and whole `scenes/` folder (every currently-open tab saved first
+  — not just the active one, see `EditorScene::open_scenes` under Editor above — so unsaved edits
+  anywhere are included) under an output `res/` folder alongside a generated `res/game.ron` —
+  wiping any previous `res/` first so a removed/renamed asset doesn't linger across re-exports.
 - [runtime/src/main.rs](runtime/src/main.rs) — the export template itself: a generic binary with
-  no editor/egui dependency. At its own startup it reads `res/game.ron`/`res/scene.ron` next to its
-  exe (exe-relative, same convention as `resolve_resource_path`/`copy_res_to_output_dir`), builds a
-  `World` the same way `EditorScene::continue_load` does, and starts every enabled script
-  attachment the same way `EditorScene::start_play` does — then its `RuntimeScene::update`/`render`
+  no editor/egui dependency. At its own startup it reads `res/game.ron` next to its exe
+  (exe-relative, same convention as `resolve_resource_path`/`copy_res_to_output_dir`), then loads
+  the scene file its `start_scene` field names (`res/<start_scene>`, e.g. `res/scenes/main.ron`),
+  builds a `World` via `EntityRecord::spawn_into` (all at once, unlike the editor's incremental
+  load) and starts every enabled script attachment the same way `EditorScene::start_play` does —
+  then its `RuntimeScene::update`/`render`
   mirror `EditorScene`'s own Play-mode per-frame loop (script updates, transform sync, active-camera
-  push, sprite/model draws), just without egui/picking/gizmos. A missing/corrupt `game.ron`/
-  `scene.ron` is a hard startup failure (`eprintln!` + exit), not a silent empty-scene fallback,
-  since `export_project` always writes both — release builds hide the console window
+  push, sprite/model draws), just without egui/picking/gizmos. A missing/corrupt `game.ron` or start
+  scene is a hard startup failure (`eprintln!` + exit), not a silent empty-scene fallback, since
+  `export_project` always writes both — release builds hide the console window
   (`windows_subsystem`), debug builds keep it for that diagnostic.
 
 ### Other core modules

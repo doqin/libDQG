@@ -8,9 +8,9 @@ use crate::project::Project;
 
 /// Packages `project` into a standalone folder at `output_dir`: the prebuilt `runtime` export
 /// template (see [`find_template`]), renamed to the project's name, plus a `res/` folder holding
-/// the project's assets, scripts, and scene — the exact layout `runtime`'s own `res_dir`/
-/// `load_manifest`/`load_scene_file` expect. Pure file copying, no compilation — see the
-/// export/compile implementation plan for why.
+/// the project's assets, scripts, and scenes — the exact layout `runtime`'s own `res_dir`/
+/// `load_manifest` expect. Pure file copying, no compilation — see the export/compile
+/// implementation plan for why.
 pub fn export_project(project: &Project, output_dir: &Path) -> anyhow::Result<()> {
     let template = find_template()?;
     package_into(&template, project, output_dir)
@@ -48,12 +48,17 @@ fn package_into(template: &Path, project: &Project, output_dir: &Path) -> anyhow
         fs_extra::dir::copy(&scripts_dir, &res_dir, &copy_options)?;
     }
 
-    let scene_src = project.root.join("scenes/main.ron");
-    if scene_src.is_file() {
-        fs::copy(&scene_src, res_dir.join("scene.ron"))?;
+    let scenes_dir = project.root.join("scenes");
+    if scenes_dir.is_dir() {
+        fs_extra::dir::copy(&scenes_dir, &res_dir, &copy_options)?;
     }
 
-    let manifest = GameManifest { title: project.manifest.name.clone(), width: 1280, height: 720 };
+    let manifest = GameManifest {
+        title: project.manifest.name.clone(),
+        width: 1280,
+        height: 720,
+        start_scene: project.manifest.start_scene.clone(),
+    };
     fs::write(res_dir.join("game.ron"), ron::ser::to_string_pretty(&manifest, Default::default())?)?;
 
     Ok(())
@@ -118,13 +123,14 @@ mod tests {
         assert!(output_dir.join(&exe_name).is_file(), "template should be copied and renamed to the project name");
         assert!(output_dir.join("res/assets/textures/hero.png").is_file());
         assert!(output_dir.join("res/scripts/move.rhai").is_file());
-        assert!(output_dir.join("res/scene.ron").is_file(), "an empty project still has scenes/main.ron to mirror");
+        assert!(output_dir.join("res/scenes/main.ron").is_file(), "an empty project still has scenes/main.ron to mirror");
 
         let manifest_text = fs::read_to_string(output_dir.join("res/game.ron")).unwrap();
         let manifest: GameManifest = ron::from_str(&manifest_text).unwrap();
         assert_eq!(manifest.title, project.manifest.name);
         assert_eq!(manifest.width, 1280);
         assert_eq!(manifest.height, 720);
+        assert_eq!(manifest.start_scene, PathBuf::from("scenes/main.ron"));
     }
 
     #[test]

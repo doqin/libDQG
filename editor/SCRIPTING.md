@@ -71,6 +71,7 @@ of members, whether it's your own entity or one you looked up.
 | `entity.name()` | Returns the entity's name (the one shown in the Hierarchy panel), as text. |
 | `entity.set_name(name)` | Renames the entity. |
 | `entity.despawn()` | Removes the entity from the scene. If a script despawns its own entity, none of that entity's other scripts run for the rest of that frame. |
+| `entity.set_persistent(persistent)` | Marks (or unmarks) the entity as surviving a scene change (see [The `scene` object](#the-scene-object)) instead of being removed along with everything else in the outgoing scene. Its scripts keep running uninterrupted across the change, with all their state intact. |
 | `entity.attach_script(path)` | Attaches another script to this entity, by its project-relative path (the same form shown in the Inspector, e.g. `"scripts/Move.rhai"`) — and, unlike attaching one from the Inspector's Assets panel, it starts running immediately, the same session, not just after the next Stop/Play. |
 | `entity.set_script_enabled(index, enabled)` | Enables or disables one of the entity's attached scripts by its position in the Inspector's Scripts list (`0` is the first one). |
 | `entity.set_sprite(path)` | Attaches (or swaps to) a sprite, loading the texture at `path` (project-relative, e.g. `"assets/textures/player.png"`) — same idea as the Inspector's **Attach Sprite** picker. Replaces whatever renderable the entity already had, if any. |
@@ -130,6 +131,39 @@ A couple of things worth knowing about `world.find(...)`:
 - Anything you *do* to an entity reached via `find` (`.translate(...)`, `.despawn()`, ...) takes
   effect right away, same as it does for `entity` — the frame-start staleness only applies to
   what `find` hands you, not to writes made through it.
+
+## The `scene` object
+
+A project can hold more than one scene — see the **Scenes** section of the Assets panel. `scene`
+gives a script a way to switch which one is currently loaded:
+
+| Member | Description |
+|---|---|
+| `scene.change(path)` | Loads a different scene, by its project-relative path (e.g. `"scenes/level2.ron"`, the same form shown in the Assets panel). |
+
+```rhai
+let on_update = |dt, input| {
+    if input.is_pressed("Enter") {
+        scene.change("scenes/level2.ron");
+    }
+};
+```
+
+A scene change removes every entity in the current scene — **except** ones marked persistent with
+`entity.set_persistent(true)` — and spawns the new scene's entities in their place, starting their
+scripts. This includes the entity whose script called `scene.change(...)`: unless it's marked
+persistent, it's removed along with the rest of the outgoing scene.
+
+```rhai
+// A "game manager" entity that should survive every scene change in the game.
+let on_start = || {
+    entity.set_persistent(true);
+};
+```
+
+Marking an entity persistent is a script-only, runtime choice — there's no checkbox for it in the
+editor, the same way there's nothing to configure ahead of time about it in the Inspector. It only
+takes effect once `on_start`/`on_update` actually calls `entity.set_persistent(true)`.
 
 ## The `input` object
 
@@ -216,6 +250,12 @@ Play begins.
 ## Play and Stop
 
 Scripts only run while the editor is in Play mode. When you click **Play**:
+- If any open scene tab has unsaved changes (shown as a `*` on its tab), you're asked whether to
+  save everything first, play anyway, or cancel. This matters because `scene.change(...)` (see
+  [The `scene` object](#the-scene-object)) loads a `.ron` file straight off disk — if you're
+  editing a scene in one tab and a script switches to it from another during this Play session,
+  playing without saving means it loads whatever was last saved there, not what's shown in its
+  tab right now.
 - Every enabled script attached to every entity has its `on_start` called once (if it has one).
 - Every entity's Transform panel in the Inspector becomes read-only for the duration — a script
   moving the entity every frame would otherwise fight with you dragging the same fields.
@@ -232,6 +272,8 @@ entities look like, and which entities exist at all:
   goes back to whatever it was showing before Play.
 - Any entity a script spawned (`world.spawn_entity(...)`) disappears; any entity a script
   despawned (`entity.despawn()`) comes back.
+- Any `scene.change(...)` that happened during Play is undone — you're back in the scene you were
+  editing when you clicked Play, exactly as it was, even after several scene changes.
 - All script state (including things like `elapsed` above) is discarded.
 
 Play-testing never permanently changes your scene — that's also why Save is disabled while
