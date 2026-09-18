@@ -102,7 +102,7 @@ impl RuntimeScene {
 
         let mut runtime = ScriptRuntime::new(self.res_dir.clone());
         runtime.begin_frame(&world);
-        for error in runtime.start_all_scripts(&world, &self.res_dir) {
+        for error in runtime.start_all_scripts(&mut world, &self.res_dir, Some(renderer)) {
             eprintln!("Script error ({}): {}", error.script.display(), error.message);
         }
 

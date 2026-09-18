@@ -8,7 +8,7 @@
                 scale: (1.0, 1.0, 1.0),
             ),
             renderable: Some(Model(
-                model_path: "assets\\models\\cube.obj",
+                model_path: "assets/models/cube.obj",
             )),
             scripts: [],
             camera: None,
@@ -21,7 +21,7 @@
                 scale: (1.0, 1.0, 1.0),
             ),
             renderable: Some(Model(
-                model_path: "assets\\models\\cube.obj",
+                model_path: "assets/models/cube.obj",
             )),
             scripts: [],
             camera: None,
@@ -34,7 +34,7 @@
                 scale: (1.0, 1.0, 1.0),
             ),
             renderable: Some(Sprite(
-                texture_path: "assets\\textures\\kako.png",
+                texture_path: "assets/textures/kako.png",
                 width: 1.0,
                 height: 1.0,
             )),
@@ -49,7 +49,7 @@
                 scale: (1.0, 1.0, 1.0),
             ),
             renderable: Some(Sprite(
-                texture_path: "assets\\textures\\329009.jpg",
+                texture_path: "assets/textures/329009.jpg",
                 width: 1.0,
                 height: 0.5625,
             )),
@@ -64,27 +64,27 @@
                 scale: (1.0, 1.0, 1.0),
             ),
             renderable: Some(Model(
-                model_path: "assets\\models\\kakoball.obj",
+                model_path: "assets/models/kakoball.obj",
             )),
             scripts: [
                 (
-                    path: "scripts\\spin.rhai",
+                    path: "scripts/spin.rhai",
                     enabled: true,
                 ),
                 (
-                    path: "scripts\\movement.rhai",
+                    path: "scripts/movement.rhai",
                     enabled: true,
                 ),
                 (
-                    path: "scripts\\fly.rhai",
+                    path: "scripts/fly.rhai",
                     enabled: true,
                 ),
                 (
-                    path: "scripts\\marx_follow.rhai",
+                    path: "scripts/marx_follow.rhai",
                     enabled: true,
                 ),
                 (
-                    path: "scripts\\spawn_kako_cube.rhai",
+                    path: "scripts/spawn_kako_cube.rhai",
                     enabled: true,
                 ),
             ],
@@ -98,7 +98,7 @@
                 scale: (1.0, 1.0, 1.0),
             ),
             renderable: Some(Model(
-                model_path: "assets\\models\\kakoball.obj",
+                model_path: "assets/models/kakoball.obj",
             )),
             scripts: [],
             camera: None,
@@ -111,7 +111,7 @@
                 scale: (1.0, 1.0, 1.0),
             ),
             renderable: Some(Model(
-                model_path: "assets\\models\\kakoball.obj",
+                model_path: "assets/models/kakoball.obj",
             )),
             scripts: [],
             camera: None,
@@ -126,7 +126,7 @@
             renderable: None,
             scripts: [
                 (
-                    path: "scripts\\follow_player.rhai",
+                    path: "scripts/follow_player.rhai",
                     enabled: true,
                 ),
             ],
@@ -147,7 +147,7 @@
             renderable: None,
             scripts: [
                 (
-                    path: "scripts\\change_scene.rhai",
+                    path: "scripts/change_scene.rhai",
                     enabled: true,
                 ),
             ],

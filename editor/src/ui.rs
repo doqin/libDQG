@@ -41,6 +41,11 @@ pub struct UiRequests {
     /// help since renaming may also need to update `ProjectManifest.start_scene` and any open
     /// tab's identity, neither of which `ui.rs` owns.
     pub rename_scene: Option<(PathBuf, String)>,
+    /// A script tile's inline rename was committed (`(old_path, new_stem)`) — deferred to
+    /// `EditorScene::rename_script`, which fixes up every open tab's `World` and every scene file
+    /// on disk that references the old path, not just whichever `World` happens to be active —
+    /// `ui.rs` only ever sees one `World` at a time.
+    pub rename_script: Option<(PathBuf, String)>,
     /// A scene tile's "Set as Start Scene" context-menu item was clicked — needs `&mut Project` to
     /// persist `ProjectManifest.start_scene`, which `ui.rs` only ever sees as `&Project`.
     pub set_start_scene: Option<PathBuf>,
@@ -90,7 +95,6 @@ pub fn draw(
         project,
         assets_expanded,
         texture_previews,
-        world,
         settings,
         renaming_script,
         script_rename_buffer,
@@ -296,7 +300,6 @@ fn draw_assets_panel(
     project: Option<&Project>,
     assets_expanded: &mut bool,
     texture_previews: &mut HashMap<PathBuf, egui::TextureHandle>,
-    world: &mut World,
     settings: &mut EditorSettings,
     renaming_script: &mut Option<PathBuf>,
     script_rename_buffer: &mut String,
@@ -332,7 +335,7 @@ fn draw_assets_panel(
                 ui.separator();
                 draw_model_group(ui, project);
                 ui.separator();
-                draw_script_group(ui, project, world, settings, renaming_script, script_rename_buffer, requests);
+                draw_script_group(ui, project, settings, renaming_script, script_rename_buffer, requests);
                 ui.separator();
                 draw_scene_group(ui, project, current_scene, renaming_scene, scene_rename_buffer, requests);
             });
@@ -365,7 +368,6 @@ fn draw_model_group(ui: &mut egui::Ui, project: &Project) {
 fn draw_script_group(
     ui: &mut egui::Ui,
     project: &Project,
-    world: &mut World,
     settings: &mut EditorSettings,
     renaming_script: &mut Option<PathBuf>,
     script_rename_buffer: &mut String,
@@ -384,7 +386,7 @@ fn draw_script_group(
         });
         ui.horizontal_wrapped(|ui| {
             for path in project.list_scripts() {
-                draw_script_tile(ui, project, &path, world, settings, renaming_script, script_rename_buffer, requests);
+                draw_script_tile(ui, project, &path, settings, renaming_script, script_rename_buffer, requests);
             }
         });
     });
@@ -580,7 +582,6 @@ fn draw_script_tile(
     ui: &mut egui::Ui,
     project: &Project,
     path: &Path,
-    world: &mut World,
     settings: &mut EditorSettings,
     renaming_script: &mut Option<PathBuf>,
     script_rename_buffer: &mut String,
@@ -592,9 +593,12 @@ fn draw_script_tile(
         if renaming_script.as_deref() == Some(path) {
             let response = ui.text_edit_singleline(script_rename_buffer);
             if response.lost_focus() {
-                if rename_script(project, world, path, script_rename_buffer) {
-                    requests.edited = true;
-                }
+                // Deferred to `EditorScene::rename_script`, not handled here like the old
+                // single-scene version of this rename was — a `ScriptAttachment` can be
+                // referenced by entities in *any* scene file, not just whichever one is the
+                // active tab's `World`, so fixing it up needs `Project`/every open tab together,
+                // neither of which `ui.rs` owns.
+                requests.rename_script = Some((path.to_path_buf(), script_rename_buffer.clone()));
                 *renaming_script = None;
             } else {
                 response.request_focus();
@@ -635,47 +639,6 @@ fn draw_script_tile(
 
         ui.add(egui::Label::new(asset_file_name(path)).wrap());
     });
-}
-
-/// Renames `old_path` (project-relative) to `new_stem` in place on disk, keeping its extension,
-/// then fixes up every [`ScriptAttachment`] anywhere in `world` that referenced the old path —
-/// otherwise every entity that had this script attached would silently start pointing at a file
-/// that no longer exists. Refuses (and reports, rather than silently overwriting) if something
-/// is already using the target name. Returns whether the rename actually happened (and so
-/// `world` was mutated and needs saving) — `false` for a no-op (empty/unchanged name) or a
-/// refused/failed rename.
-fn rename_script(project: &Project, world: &mut World, old_path: &Path, new_stem: &str) -> bool {
-    let new_stem = new_stem.trim();
-    if new_stem.is_empty() {
-        return false;
-    }
-
-    let extension = old_path.extension().map(|ext| ext.to_string_lossy().into_owned()).unwrap_or_default();
-    let new_path = old_path.with_file_name(format!("{new_stem}.{extension}"));
-    if new_path == old_path {
-        return false;
-    }
-
-    let old_absolute = project.root.join(old_path);
-    let new_absolute = project.root.join(&new_path);
-    if new_absolute.exists() {
-        eprintln!("Failed to rename script: {} already exists", new_path.display());
-        return false;
-    }
-
-    if let Err(e) = std::fs::rename(&old_absolute, &new_absolute) {
-        eprintln!("Failed to rename script: {e}");
-        return false;
-    }
-
-    for (_, list) in world.scripts.iter_mut() {
-        for attachment in list.0.iter_mut() {
-            if attachment.path == old_path {
-                attachment.path = new_path.clone();
-            }
-        }
-    }
-    true
 }
 
 /// Opens `path` (project-relative) in [`EditorSettings::preferred_editor`], prompting for one

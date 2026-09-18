@@ -171,12 +171,14 @@ matrix directly.
   registered once in that type's `register_extra`. Persistent per-script state relies on Rhai
   closures (`let on_update = |dt, input| { ... };`, not a plain `fn`) capturing `Scope` variables
   by reference — see the `scripting::closure_state_spike` test for why plain `fn`s can't do this.
-  `EditorScene`'s Play/Stop toggle (top menu bar) snapshots `World::transforms` before running
-  scripts and restores it on Stop, dropping the `ScriptRuntime` (and all script state) with it —
-  valid only because v1 scripts can't spawn/despawn entities or touch anything but their own
-  `Transform`; growing the script API past that needs a heavier restore than a transform-only
-  snapshot. A script that errors repeatedly auto-disables itself and errors surface in a small
-  overlay rather than crashing the editor.
+  `EditorScene`'s Play/Stop toggle (top menu bar) clones the *whole* `World` (`World: Clone`,
+  cheap and GPU-allocation-free — see that type's own doc comment) before running scripts and
+  restores it wholesale on Stop, dropping the `ScriptRuntime` (and all script state) with it —
+  this is what makes every category of mutation a script can make (transform edits,
+  spawn/despawn/rename, script attach/enable, renderable changes, `entity.set_persistent`, even a
+  `scene.change(...)` mid-Play) fully revert on Stop, not just `Transform`. A script that errors
+  repeatedly auto-disables itself and errors surface in a small overlay rather than crashing the
+  editor.
 
 ### Export: `runtime` and `editor::export`
 

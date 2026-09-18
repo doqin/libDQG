@@ -24,7 +24,7 @@
                 scale: (1.0, 1.0, 1.0),
             ),
             renderable: Some(Model(
-                model_path: "assets\\models\\cube.obj",
+                model_path: "assets/models/cube.obj",
             )),
             scripts: [],
             camera: None,
@@ -39,7 +39,7 @@
             renderable: None,
             scripts: [
                 (
-                    path: "scripts\\change_scene.rhai",
+                    path: "scripts/change_scene.rhai",
                     enabled: true,
                 ),
             ],

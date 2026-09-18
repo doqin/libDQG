@@ -1,5 +1,5 @@
 (
     format_version: 1,
     name: "test-project",
-    start_scene: "scenes\\main.ron",
+    start_scene: "scenes/main.ron",
 )

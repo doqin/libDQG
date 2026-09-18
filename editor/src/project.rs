@@ -17,6 +17,22 @@ fn default_start_scene() -> PathBuf {
     PathBuf::from(DEFAULT_SCENE_FILE)
 }
 
+/// Rewrites `path`'s separators to `/`, regardless of the host OS's own convention. Every
+/// project-relative path this module hands back or persists (`list_scenes`/`list_scripts`/
+/// `list_assets`'s `strip_prefix` results, `create_scene`/`create_script`/`import_asset`'s
+/// returned paths, `set_start_scene`'s argument) must round-trip identically whether the project
+/// is saved on Windows and later opened/exported-and-run on Linux (`runtime`, CI) or vice versa.
+/// `Path::join` and component parsing accept `/` as a separator on Windows too, but Unix treats a
+/// literal `\` as an ordinary filename character, not a separator — so a path built with native
+/// separators on Windows (`scenes\main.ron`) silently fails to resolve at all once read back on
+/// Linux. Rebuilding the `PathBuf` from the normalized string (rather than via `.join(...)`,
+/// which would reintroduce native separators) is what makes it stick: `Path`'s `Display`/
+/// `to_str()` never rewrites an already-`/`-separated string on Windows, only `.join()` inserts a
+/// native separator between components.
+fn to_portable_path(path: &Path) -> PathBuf {
+    PathBuf::from(path.to_string_lossy().replace('\\', "/"))
+}
+
 /// Starter content for [`Project::create_script`]'s "New Script" boilerplate — both hooks
 /// [`libdqg::scripting::ScriptRuntime`] looks for, stubbed out. `on_start`/`on_update` must stay
 /// `let`-bound closures rather than plain `fn`s (see `ScriptRuntime::start_script`'s doc comment
@@ -145,7 +161,7 @@ impl Project {
             .map(|entry| entry.path())
             .filter(|path| path.is_file())
             .filter(|path| path.extension().and_then(|e| e.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("ron")))
-            .filter_map(|path| path.strip_prefix(&self.root).map(Path::to_path_buf).ok())
+            .filter_map(|path| path.strip_prefix(&self.root).ok().map(to_portable_path))
             .collect();
         paths.sort();
         paths
@@ -166,13 +182,15 @@ impl Project {
         }
 
         SceneFile::default().save(&candidate)?;
-        Ok(candidate.strip_prefix(&self.root)?.to_path_buf())
+        Ok(to_portable_path(candidate.strip_prefix(&self.root)?))
     }
 
     /// Marks `scene` (project-relative) as the project's start scene and persists the manifest
-    /// immediately, so it survives without an explicit project-level Save step.
+    /// immediately, so it survives without an explicit project-level Save step. Normalizes
+    /// `scene`'s separators (see [`to_portable_path`]) in case the caller built it some way other
+    /// than one of this struct's own path-returning methods.
     pub fn set_start_scene(&mut self, scene: PathBuf) -> anyhow::Result<()> {
-        self.manifest.start_scene = scene;
+        self.manifest.start_scene = to_portable_path(&scene);
         fs::write(self.manifest_path(), ron::ser::to_string_pretty(&self.manifest, Default::default())?)?;
         Ok(())
     }
@@ -198,7 +216,7 @@ impl Project {
                     .and_then(|ext| ext.to_str())
                     .is_some_and(|ext| extensions.contains(&ext.to_lowercase().as_str()))
             })
-            .filter_map(|path| path.strip_prefix(&self.root).map(Path::to_path_buf).ok())
+            .filter_map(|path| path.strip_prefix(&self.root).ok().map(to_portable_path))
             .collect();
         paths.sort();
         paths
@@ -215,7 +233,7 @@ impl Project {
             .map(|entry| entry.path())
             .filter(|path| path.is_file())
             .filter(|path| path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("rhai")))
-            .filter_map(|path| path.strip_prefix(&self.root).map(Path::to_path_buf).ok())
+            .filter_map(|path| path.strip_prefix(&self.root).ok().map(to_portable_path))
             .collect();
         paths.sort();
         paths
@@ -239,7 +257,7 @@ impl Project {
         }
 
         fs::write(&candidate, SCRIPT_BOILERPLATE)?;
-        Ok(candidate.strip_prefix(&self.root)?.to_path_buf())
+        Ok(to_portable_path(candidate.strip_prefix(&self.root)?))
     }
 
     /// Copies `src` into the project's `assets/` folder, sorted into `textures/`/`models/`/
@@ -265,7 +283,7 @@ impl Project {
             Self::import_obj_dependencies(src, &dest_dir)?;
         }
 
-        Ok(dest.strip_prefix(&self.root)?.to_path_buf())
+        Ok(to_portable_path(dest.strip_prefix(&self.root)?))
     }
 
     /// Best-effort copy of an OBJ's `mtllib` material file(s) and the textures they reference

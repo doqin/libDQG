@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -372,7 +372,7 @@ impl EditorScene {
     /// any open tab's identity to match. Refuses (and reports, rather than silently overwriting)
     /// if something is already using the target name. Doesn't fix up `scene.change("...")` calls
     /// inside script source — see `ui::draw_scene_tile`'s doc comment for why that's not possible
-    /// the way `ui::rename_script` fixes up `ScriptAttachment`s.
+    /// the way [`Self::rename_script`] fixes up `ScriptAttachment`s.
     fn rename_scene(&mut self, old_path: PathBuf, new_stem: String) {
         let new_stem = new_stem.trim();
         if new_stem.is_empty() {
@@ -409,13 +409,96 @@ impl EditorScene {
         }
     }
 
+    /// Renames the script file at `old_path` (project-relative) to `new_stem`, keeping its
+    /// extension, then fixes up every [`libdqg::scripting::ScriptAttachment`] that referenced the
+    /// old path — in every open tab's live `World` *and* every scene file on disk that isn't
+    /// currently open (loaded, patched, and saved back only if it actually referenced the old
+    /// path). A script can be attached to entities in any scene in the project, not just whichever
+    /// one happens to be the active tab, so both are needed — fixing up only the active `World`
+    /// (as an earlier, single-scene version of this did) would silently leave every other scene's
+    /// reference pointing at a file that no longer exists. Refuses (and reports, rather than
+    /// silently overwriting) if something is already using the target name.
+    fn rename_script(&mut self, old_path: PathBuf, new_stem: String) {
+        let new_stem = new_stem.trim();
+        if new_stem.is_empty() {
+            return;
+        }
+        let extension = old_path.extension().map(|ext| ext.to_string_lossy().into_owned()).unwrap_or_default();
+        let new_path = old_path.with_file_name(format!("{new_stem}.{extension}"));
+        if new_path == old_path {
+            return;
+        }
+
+        {
+            let Some(project) = self.project.as_ref() else { return };
+            let old_absolute = project.root.join(&old_path);
+            let new_absolute = project.root.join(&new_path);
+            if new_absolute.exists() {
+                eprintln!("Failed to rename script: {} already exists", new_path.display());
+                return;
+            }
+            if let Err(e) = std::fs::rename(&old_absolute, &new_absolute) {
+                eprintln!("Failed to rename script: {e}");
+                return;
+            }
+        }
+
+        // Every open tab's live World — marking a tab dirty only if it actually referenced the
+        // renamed script, so this doesn't spuriously flag unrelated tabs as unsaved.
+        let open_paths: HashSet<PathBuf> = self.open_scenes.iter().map(|scene| scene.path.clone()).collect();
+        for scene in self.open_scenes.iter_mut() {
+            let mut changed = false;
+            for (_, list) in scene.world.scripts.iter_mut() {
+                for attachment in list.0.iter_mut() {
+                    if attachment.path == old_path {
+                        attachment.path = new_path.clone();
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                scene.dirty = true;
+            }
+        }
+
+        // Every other scene file on disk — anything already covered above via an open tab is
+        // skipped here, since that in-memory copy is the current source of truth until it's saved.
+        let Some(project) = self.project.as_ref() else { return };
+        for scene_path in project.list_scenes() {
+            if open_paths.contains(&scene_path) {
+                continue;
+            }
+            let mut scene_file = match project.load_scene(&scene_path) {
+                Ok(scene_file) => scene_file,
+                Err(e) => {
+                    eprintln!("Failed to check {} for script references: {e}", scene_path.display());
+                    continue;
+                }
+            };
+            let mut changed = false;
+            for record in scene_file.entities.iter_mut() {
+                for attachment in record.scripts.iter_mut() {
+                    if attachment.path == old_path {
+                        attachment.path = new_path.clone();
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                if let Err(e) = scene_file.save(&project.root.join(&scene_path)) {
+                    eprintln!("Failed to update script reference in {}: {e}", scene_path.display());
+                }
+            }
+        }
+    }
+
     /// Snapshots the active tab's whole [`World`] and starts every enabled script attachment (in
     /// order) on every entity that has one, then switches to [`EditorMode::Playing`]. A no-op if
     /// there's no open project (the Play button is disabled in that case anyway — see
     /// `ui::draw_menu_bar`).
-    fn start_play(&mut self) {
+    fn start_play(&mut self, renderer: &Renderer) {
         let Some(project) = self.project.as_ref() else { return };
-        let scene = &self.open_scenes[self.active_scene];
+        let scene = &mut self.open_scenes[self.active_scene];
 
         let world_snapshot = scene.world.clone();
         let mut runtime = ScriptRuntime::new(project.root.clone());
@@ -425,7 +508,7 @@ impl EditorScene {
         // snapshot guarantee `on_update` already has for cross-entity reads.
         runtime.begin_frame(&scene.world);
 
-        for error in runtime.start_all_scripts(&scene.world, &project.root) {
+        for error in runtime.start_all_scripts(&mut scene.world, &project.root, Some(renderer)) {
             self.script_errors.push((format_script_error(&error), Instant::now()));
         }
 
@@ -447,10 +530,10 @@ impl EditorScene {
     /// off disk, so a script that jumps to a dirty *other* tab during this session would otherwise
     /// silently see whatever was last saved there, not what's on screen right now. Starts Play
     /// immediately, with no prompt, if nothing is dirty.
-    fn request_play(&mut self) {
+    fn request_play(&mut self, renderer: &Renderer) {
         let dirty_paths: Vec<PathBuf> = self.open_scenes.iter().filter(|scene| scene.dirty).map(|scene| scene.path.clone()).collect();
         if dirty_paths.is_empty() {
-            self.start_play();
+            self.start_play(renderer);
         } else {
             self.play_confirmation = Some(dirty_paths);
         }
@@ -610,11 +693,11 @@ impl Scene for EditorScene {
                 Some(PlayConfirmAction::SaveAndPlay) => {
                     self.save_all_dirty();
                     self.play_confirmation = None;
-                    self.start_play();
+                    self.start_play(renderer);
                 }
                 Some(PlayConfirmAction::PlayWithoutSaving) => {
                     self.play_confirmation = None;
-                    self.start_play();
+                    self.start_play(renderer);
                 }
                 Some(PlayConfirmAction::Cancel) => {
                     self.play_confirmation = None;
@@ -737,6 +820,10 @@ impl Scene for EditorScene {
             self.rename_scene(old_path, new_stem);
         }
 
+        if let Some((old_path, new_stem)) = requests.rename_script.take() {
+            self.rename_script(old_path, new_stem);
+        }
+
         if let Some(path) = requests.set_start_scene.take() {
             if let Some(project) = self.project.as_mut() {
                 if let Err(e) = project.set_start_scene(path) {
@@ -749,7 +836,7 @@ impl Scene for EditorScene {
             if is_playing {
                 self.stop_play();
             } else {
-                self.request_play();
+                self.request_play(renderer);
             }
         }
 
