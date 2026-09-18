@@ -409,16 +409,22 @@ impl EditorScene {
 
         if project.manifest.start_scene == old_path {
             if let Err(e) = project.set_start_scene(new_path.clone()) {
-                // `set_start_scene` already updated the in-memory manifest before its write
-                // failed, so without this, memory would say `new_path`, the on-disk manifest
-                // would still say `old_path`, and the actual file would sit at `new_path` — three
-                // different answers for "where's the start scene". Undo the rename and the
-                // in-memory manifest change, then stop before touching any open tab.
+                // `set_start_scene` already reverted `manifest.start_scene` back to `old_path` on
+                // its own write failure (see its own doc comment) — so undoing the file rename is
+                // all that's needed to bring the actual file back in line with that. But if *this*
+                // rename-back also fails, the file is stuck at `new_path` while memory now says
+                // `old_path` — worse than before, since nothing points at the truth anymore. Force
+                // memory back to `new_path` in that case so it at least matches where the file
+                // really is; the on-disk manifest itself is still whatever `set_start_scene`'s own
+                // failed write left it as, which this can't resolve any further from here.
                 eprintln!("Failed to update start scene after rename: {e}");
                 if let Err(rollback_err) = std::fs::rename(&new_absolute, &old_absolute) {
-                    eprintln!("Failed to restore scene after manifest error: {rollback_err}");
+                    eprintln!(
+                        "Failed to restore scene after manifest error: {rollback_err} — the file remains at {}",
+                        new_path.display()
+                    );
+                    project.manifest.start_scene = new_path.clone();
                 }
-                project.manifest.start_scene = old_path.clone();
                 return;
             }
         }
@@ -431,14 +437,14 @@ impl EditorScene {
     }
 
     /// Renames the script file at `old_path` (project-relative) to `new_stem`, keeping its
-    /// extension, then fixes up every [`libdqg::scripting::ScriptAttachment`] that referenced the
-    /// old path — in every open tab's live `World` *and* every scene file on disk that isn't
-    /// currently open (loaded, patched, and saved back only if it actually referenced the old
-    /// path). A script can be attached to entities in any scene in the project, not just whichever
-    /// one happens to be the active tab, so both are needed — fixing up only the active `World`
-    /// (as an earlier, single-scene version of this did) would silently leave every other scene's
-    /// reference pointing at a file that no longer exists. Refuses (and reports, rather than
-    /// silently overwriting) if something is already using the target name.
+    /// extension, then fixes up and saves every [`libdqg::scripting::ScriptAttachment`] that
+    /// referenced the old path — in every open tab's live `World` (saved immediately, not just
+    /// left dirty) *and* every scene file on disk that isn't currently open. A script can be
+    /// attached to entities in any scene in the project, not just whichever one happens to be the
+    /// active tab, so both are needed — fixing up only the active `World` (as an earlier,
+    /// single-scene version of this did) would silently leave every other scene's reference
+    /// pointing at a file that no longer exists. Refuses (and reports, rather than silently
+    /// overwriting) if something is already using the target name.
     ///
     /// Copies rather than renames the file up front, deleting the original only once every scene
     /// has been migrated (or confirmed not to reference it) — a scene file that fails to load or
@@ -476,23 +482,33 @@ impl EditorScene {
 
         let mut all_migrated = true;
 
-        // Every open tab's live World — marking a tab dirty only if it actually referenced the
-        // renamed script, so this doesn't spuriously flag unrelated tabs as unsaved. In-memory
-        // updates can't fail the way a disk load/save below can, so these always count as
-        // migrated (the tab's own Save/autosave path is what persists this afterward).
+        // Every open tab's live World, saved immediately (not just marked dirty for some later,
+        // unpredictable Save/close/export) — deleting `old_absolute` below happens as soon as
+        // `all_migrated` holds, and an in-memory-only fixup wouldn't actually be on disk yet: if
+        // the editor exited or crashed before that tab was next saved, its persisted scene file
+        // would still reference `old_path`, which by then no longer exists.
         let open_paths: HashSet<PathBuf> = self.open_scenes.iter().map(|scene| scene.path.clone()).collect();
-        for scene in self.open_scenes.iter_mut() {
-            let mut changed = false;
-            for (_, list) in scene.world.scripts.iter_mut() {
-                for attachment in list.0.iter_mut() {
-                    if attachment.path == old_path {
-                        attachment.path = new_path.clone();
-                        changed = true;
+        if let Some(project) = self.project.as_ref() {
+            for scene in self.open_scenes.iter_mut() {
+                let mut changed = false;
+                for (_, list) in scene.world.scripts.iter_mut() {
+                    for attachment in list.0.iter_mut() {
+                        if attachment.path == old_path {
+                            attachment.path = new_path.clone();
+                            changed = true;
+                        }
                     }
                 }
-            }
-            if changed {
-                scene.dirty = true;
+                if changed {
+                    match project.save_scene(&scene.path, &scene.world, &scene.entity_assets) {
+                        Ok(()) => scene.dirty = false,
+                        Err(e) => {
+                            eprintln!("Renamed script but failed to save {}: {e}", scene.path.display());
+                            scene.dirty = true;
+                            all_migrated = false;
+                        }
+                    }
+                }
             }
         }
 
@@ -595,17 +611,26 @@ impl EditorScene {
     /// pre-Play confirmation dialog, and also what a successful Export does before packaging (see
     /// `Scene::update`'s `export_project` handling) — both need every tab's on-disk copy current,
     /// not just whichever one is active.
-    fn save_all_dirty(&mut self) {
-        let Some(project) = self.project.as_ref() else { return };
+    /// Returns `true` only if every dirty tab was actually saved — callers that need every
+    /// on-disk scene current before proceeding (Export; the pre-Play confirmation's "Save &
+    /// Play") must check this rather than assuming a save attempt is the same as a successful
+    /// one.
+    fn save_all_dirty(&mut self) -> bool {
+        let Some(project) = self.project.as_ref() else { return true };
+        let mut all_saved = true;
         for scene in self.open_scenes.iter_mut() {
             if !scene.dirty {
                 continue;
             }
             match project.save_scene(&scene.path, &scene.world, &scene.entity_assets) {
                 Ok(()) => scene.dirty = false,
-                Err(e) => eprintln!("Failed to save {}: {e}", scene.path.display()),
+                Err(e) => {
+                    eprintln!("Failed to save {}: {e}", scene.path.display());
+                    all_saved = false;
+                }
             }
         }
+        all_saved
     }
 }
 
@@ -662,7 +687,12 @@ fn format_script_error(error: &ScriptError) -> String {
 /// entirely. Rejecting anything but a single normal path component here keeps every renamed
 /// scene/script path project-root-relative, matching every other path this module hands out.
 fn is_valid_rename_stem(stem: &str) -> bool {
-    if stem.is_empty() {
+    // `Path::components` only recognizes `\` as a separator on Windows — on Unix it's just an
+    // ordinary filename character, so a stem like `"chapter\final"` would otherwise pass the
+    // component check below there but not on Windows (or once such a path round-trips through a
+    // project shared between the two). Rejecting both explicitly, on every platform, keeps a
+    // rename's result identical regardless of where it happened.
+    if stem.is_empty() || stem.contains('/') || stem.contains('\\') {
         return false;
     }
     let mut components = Path::new(stem).components();
@@ -865,19 +895,30 @@ impl Scene for EditorScene {
             if self.project.is_some() {
                 // Export packages the scene files off disk, not any tab's `World` directly — save
                 // every dirty tab first (not just the active one) so unsaved edits anywhere
-                // actually make it into the exported game.
-                self.save_all_dirty();
-            }
-            if let Some(project) = self.project.as_ref() {
-                let result = crate::export::export_project(project, &output_dir);
-                let message = match &result {
-                    Ok(()) => format!("Exported to {}", output_dir.display()),
-                    Err(e) => format!("Export failed: {e}"),
-                };
-                if let Err(e) = &result {
-                    eprintln!("Export failed: {e}");
+                // actually make it into the exported game. If any of those saves failed, the
+                // on-disk project would still have stale scene data — export would then succeed
+                // while silently packaging the wrong thing, so skip it and report the save
+                // failure instead (already `eprintln!`'d per-scene by `save_all_dirty`) rather
+                // than a possibly-misleading "Exported to ..." success message.
+                let saved = self.save_all_dirty();
+                if let Some(project) = self.project.as_ref() {
+                    if saved {
+                        let result = crate::export::export_project(project, &output_dir);
+                        let message = match &result {
+                            Ok(()) => format!("Exported to {}", output_dir.display()),
+                            Err(e) => format!("Export failed: {e}"),
+                        };
+                        if let Err(e) = &result {
+                            eprintln!("Export failed: {e}");
+                        }
+                        self.export_status = Some((message, Instant::now()));
+                    } else {
+                        self.export_status = Some((
+                            "Export aborted: one or more open scenes failed to save".to_string(),
+                            Instant::now(),
+                        ));
+                    }
                 }
-                self.export_status = Some((message, Instant::now()));
             }
         }
 

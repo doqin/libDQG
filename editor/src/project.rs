@@ -189,10 +189,23 @@ impl Project {
     /// immediately, so it survives without an explicit project-level Save step. Normalizes
     /// `scene`'s separators (see [`to_portable_path`]) in case the caller built it some way other
     /// than one of this struct's own path-returning methods.
+    ///
+    /// Transactional: if serializing or writing the manifest fails, `self.manifest.start_scene`
+    /// is restored to whatever it was before this call, so a failure here never leaves the
+    /// in-memory manifest disagreeing with what's actually on disk — callers don't each need
+    /// their own copy of that rollback.
     pub fn set_start_scene(&mut self, scene: PathBuf) -> anyhow::Result<()> {
+        let previous = self.manifest.start_scene.clone();
         self.manifest.start_scene = to_portable_path(&scene);
-        fs::write(self.manifest_path(), ron::ser::to_string_pretty(&self.manifest, Default::default())?)?;
-        Ok(())
+
+        let result = ron::ser::to_string_pretty(&self.manifest, Default::default())
+            .map_err(anyhow::Error::from)
+            .and_then(|text| fs::write(self.manifest_path(), text).map_err(anyhow::Error::from));
+
+        if result.is_err() {
+            self.manifest.start_scene = previous;
+        }
+        result
     }
 
     /// Lists assets of the given kind already in the project (relative to the project root),
