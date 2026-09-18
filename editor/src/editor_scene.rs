@@ -275,8 +275,13 @@ impl EditorScene {
             match project.load_scene(&scene_path) {
                 Ok(scene_file) => scene_file.entities.into(),
                 Err(e) => {
+                    // Same "don't touch anything" abort as `switch_or_open_scene`'s own
+                    // load-failure path: falling through to an empty scene here would let a
+                    // later Save silently overwrite whatever's actually in this corrupt/
+                    // unreadable file, and (for an already-open project) would also wipe out
+                    // every existing tab for no reason.
                     eprintln!("Failed to load scene: {e}");
-                    VecDeque::new()
+                    return;
                 }
             }
         };
@@ -355,7 +360,12 @@ impl EditorScene {
         if let Some(project) = self.project.as_ref() {
             let scene = &self.open_scenes[index];
             if let Err(e) = project.save_scene(&scene.path, &scene.world, &scene.entity_assets) {
+                // Keep the tab open on a failed autosave — removing it anyway would discard the
+                // only copy of whatever wasn't saved, contradicting this method's own "autosaving
+                // it first" contract. Lets the user retry the close (or just Save) once whatever
+                // caused the failure (disk full, permissions, ...) is resolved.
                 eprintln!("Failed to save {}: {e}", scene.path.display());
+                return;
             }
         }
 
