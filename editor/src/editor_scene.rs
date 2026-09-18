@@ -385,7 +385,8 @@ impl EditorScene {
     /// the way [`Self::rename_script`] fixes up `ScriptAttachment`s.
     fn rename_scene(&mut self, old_path: PathBuf, new_stem: String) {
         let new_stem = new_stem.trim();
-        if new_stem.is_empty() {
+        if !is_valid_rename_stem(new_stem) {
+            eprintln!("Failed to rename scene: \"{new_stem}\" is not a valid file name");
             return;
         }
         let extension = old_path.extension().map(|ext| ext.to_string_lossy().into_owned()).unwrap_or_default();
@@ -408,7 +409,17 @@ impl EditorScene {
 
         if project.manifest.start_scene == old_path {
             if let Err(e) = project.set_start_scene(new_path.clone()) {
+                // `set_start_scene` already updated the in-memory manifest before its write
+                // failed, so without this, memory would say `new_path`, the on-disk manifest
+                // would still say `old_path`, and the actual file would sit at `new_path` — three
+                // different answers for "where's the start scene". Undo the rename and the
+                // in-memory manifest change, then stop before touching any open tab.
                 eprintln!("Failed to update start scene after rename: {e}");
+                if let Err(rollback_err) = std::fs::rename(&new_absolute, &old_absolute) {
+                    eprintln!("Failed to restore scene after manifest error: {rollback_err}");
+                }
+                project.manifest.start_scene = old_path.clone();
+                return;
             }
         }
 
@@ -438,7 +449,8 @@ impl EditorScene {
     /// and some the new one — both of which still resolve — rather than a dangling reference.
     fn rename_script(&mut self, old_path: PathBuf, new_stem: String) {
         let new_stem = new_stem.trim();
-        if new_stem.is_empty() {
+        if !is_valid_rename_stem(new_stem) {
+            eprintln!("Failed to rename script: \"{new_stem}\" is not a valid file name");
             return;
         }
         let extension = old_path.extension().map(|ext| ext.to_string_lossy().into_owned()).unwrap_or_default();
@@ -642,6 +654,21 @@ fn format_script_error(error: &ScriptError) -> String {
     format!("{}: {}", error.script.display(), error.message)
 }
 
+/// Whether `stem` is safe to use as a single filename component in [`EditorScene::rename_scene`]/
+/// [`EditorScene::rename_script`] — both come straight from a text field the user typed into, with
+/// no validation of their own. `PathBuf::with_file_name` doesn't resolve or reject `/`/`\` or
+/// `.`/`..`, it just folds them into the resulting path verbatim — so an untrusted stem like
+/// `"../../outside"` would let `project.root.join(&new_path)` resolve outside the project
+/// entirely. Rejecting anything but a single normal path component here keeps every renamed
+/// scene/script path project-root-relative, matching every other path this module hands out.
+fn is_valid_rename_stem(stem: &str) -> bool {
+    if stem.is_empty() {
+        return false;
+    }
+    let mut components = Path::new(stem).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_))) && components.next().is_none()
+}
+
 /// Fixed visual size for a camera entity's frustum gizmo, in world units — deliberately not
 /// derived from the component's real `znear`/`zfar` (which can be arbitrarily large), since the
 /// gizmo is an at-a-glance orientation indicator, not a literal clip-volume outline.
@@ -732,8 +759,18 @@ impl Scene for EditorScene {
             match action {
                 Some(PlayConfirmAction::SaveAndPlay) => {
                     self.save_all_dirty();
-                    self.play_confirmation = None;
-                    self.start_play(renderer);
+                    // save_all_dirty leaves a tab dirty if its save failed — starting Play
+                    // unconditionally here would reintroduce exactly the risk this whole dialog
+                    // exists to prevent (a stale on-disk scene.change target), just silently.
+                    // Re-raise the confirmation with whichever tabs are still actually dirty
+                    // instead of assuming the save worked.
+                    let still_dirty: Vec<PathBuf> = self.open_scenes.iter().filter(|scene| scene.dirty).map(|scene| scene.path.clone()).collect();
+                    if still_dirty.is_empty() {
+                        self.play_confirmation = None;
+                        self.start_play(renderer);
+                    } else {
+                        self.play_confirmation = Some(still_dirty);
+                    }
                 }
                 Some(PlayConfirmAction::PlayWithoutSaving) => {
                     self.play_confirmation = None;
